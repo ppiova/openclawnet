@@ -29,7 +29,10 @@
             @foreach (var s in _sessions)
             {
                 <div class="session-item rounded px-2 py-1 mb-1 @(s.Id == _currentSession?.Id ? "bg-primary text-white" : "bg-light")"
-                     style="cursor:pointer" @onclick="() => SwitchSession(s)">
+                     style="cursor:pointer"
+                     @onclick="() => SwitchSession(s)"
+                     data-testid="session-row"
+                     data-session-id="@s.Id">
                     <div class="small fw-semibold text-truncate" title="@s.Title">@s.Title</div>
                     <div class="small opacity-75">@s.UpdatedAt.ToLocalTime().ToString("MMM d, HH:mm")</div>
                 </div>
@@ -53,8 +56,22 @@
                 }
                 else
                 {
-                    <span class="fw-semibold">@_currentSession.Title</span>
+                    <span class="fw-semibold" data-testid="current-session-title">@_currentSession.Title</span>
                     <button class="btn btn-sm btn-outline-secondary py-0" @onclick="StartRename" title="Rename session">✏️</button>
+                    <button class="btn btn-sm btn-outline-secondary py-0"
+                            @onclick="AutoNameSessionAsync"
+                            title="Auto-name from conversation"
+                            data-testid="auto-name-btn"
+                            disabled="@(_messages.Count == 0 || _isAutoNaming)">
+                        @if (_isAutoNaming)
+                        {
+                            <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                        }
+                        else
+                        {
+                            <span>✨</span>
+                        }
+                    </button>
                     <button class="btn btn-sm btn-outline-secondary py-0" @onclick="CopyShareLinkAsync" title="Copy shareable session link">🔗</button>
                 }
             </div>
@@ -116,6 +133,16 @@
                                        ArgsJson="@msg.ToolArgsJson"
                                        DecidedBy="@msg.ToolDecidedBy"
                                        DecidedAt="@msg.ToolDecidedAt" />
+                }
+                else if (msg.MessageType == "ToolExecution")
+                {
+                    <div class="mb-3" data-testid="tool-execution-log">
+                        <div class="d-inline-block p-2 rounded bg-light border border-info-subtle" style="max-width:80%;word-wrap:break-word;white-space:pre-wrap;">
+                            <div><strong>🔧 @msg.ToolName</strong> executed</div>
+                            <div class="small text-muted">Approval flow: @msg.ToolDecidedBy</div>
+                        </div>
+                        <div class="small text-muted mt-1">system · @msg.Timestamp.ToString("HH:mm")</div>
+                    </div>
                 }
                 else
                 {
@@ -219,6 +246,7 @@
     [SupplyParameterFromQuery(Name = "profile")]
     public string? ProfileParam { get; set; }
 
+    private readonly CancellationTokenSource _componentCts = new();
     private CancellationTokenSource? _streamCts;
     private long _lastRenderTick;
     private readonly List<ChatDisplayMessage> _messages = [];
@@ -226,6 +254,8 @@
     private string _streamingContent = string.Empty;
     private string _currentToolName = string.Empty;
     private string _pendingApprovalTool = string.Empty;
+    private bool _currentToolHadApprovalRequest;
+    private string? _currentToolApprovalSource;
     private AgentConsolePanel? _consolePanel;
 
     // Wave 5 PR-B (Vasquez): hidden sentinels Playwright can WaitForAsync on.
@@ -304,6 +334,7 @@
 
     // Rename
     private bool _isRenaming;
+    private bool _isAutoNaming;
     private string _renameTitle = string.Empty;
 
     // Agent profiles
@@ -418,6 +449,8 @@
         _streamingContent = string.Empty;
         _currentToolName = string.Empty;
         _pendingApprovalTool = string.Empty;
+        _currentToolHadApprovalRequest = false;
+        _currentToolApprovalSource = null;
         _connectionError = null;
 
         try
@@ -448,6 +481,10 @@
         _currentSession = s;
         _messages.Clear();
         _streamingContent = string.Empty;
+        _currentToolName = string.Empty;
+        _pendingApprovalTool = string.Empty;
+        _currentToolHadApprovalRequest = false;
+        _currentToolApprovalSource = null;
 
         // Load existing messages
         try
@@ -504,6 +541,72 @@
         }
         catch { /* ignore */ }
         CancelRename();
+    }
+
+    private async Task AutoNameSessionAsync()
+    {
+        if (_currentSession is null || _messages.Count == 0 || _isAutoNaming) return;
+
+        var sessionId = _currentSession.Id;
+        var previousSession = _currentSession;
+        _isAutoNaming = true;
+        _connectionError = null;
+
+        try
+        {
+            var client = HttpClientFactory.CreateClient("gateway");
+            using var response = await client.PostAsync($"api/chat/{sessionId}/auto-rename", content: null, _componentCts.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                _currentSession = previousSession;
+                var errorBody = await response.Content.ReadAsStringAsync(_componentCts.Token);
+                _connectionError = $"Auto-name failed ({(int)response.StatusCode}): {errorBody}";
+                Snackbar.Add("Auto-name failed. Please try again.", MudBlazor.Severity.Error);
+                return;
+            }
+
+            var result = await response.Content.ReadFromJsonAsync<AutoRenameResponseDto>(JsonOpts, _componentCts.Token);
+            var generatedName = result?.GeneratedName?.Trim();
+            if (string.IsNullOrWhiteSpace(generatedName))
+            {
+                _currentSession = previousSession;
+                _connectionError = "Auto-name failed: Gateway did not return a title.";
+                Snackbar.Add("Auto-name failed: no title returned.", MudBlazor.Severity.Error);
+                return;
+            }
+
+            var updated = previousSession with { Title = generatedName };
+            if (_currentSession?.Id == sessionId)
+            {
+                _currentSession = updated;
+            }
+
+            var idx = _sessions.FindIndex(s => s.Id == sessionId);
+            if (idx >= 0) _sessions[idx] = updated;
+
+            await LoadSessionsAsync();
+            if (_currentSession?.Id == sessionId)
+            {
+                _currentSession = _sessions.FirstOrDefault(s => s.Id == sessionId) ?? updated;
+            }
+
+            Snackbar.Add($"Chat renamed to '{generatedName}'", MudBlazor.Severity.Success, config => config.VisibleStateDuration = 3000);
+        }
+        catch (OperationCanceledException) when (_componentCts.IsCancellationRequested)
+        {
+            _currentSession = previousSession;
+        }
+        catch (Exception ex)
+        {
+            _currentSession = previousSession;
+            _connectionError = $"Auto-name failed: {ex.Message}";
+            Snackbar.Add("Auto-name failed. Please try again.", MudBlazor.Severity.Error);
+        }
+        finally
+        {
+            _isAutoNaming = false;
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private async Task CopyShareLinkAsync()
@@ -595,6 +698,7 @@
                         //   { "type":"tool_approval", "requestId":"guid", "toolName":"…",
                         //     "toolDescription":"…", "toolArgsJson":"…" }
                         _pendingApprovalTool = evt.ToolName ?? evt.Content ?? string.Empty;
+                        _currentToolHadApprovalRequest = true;
                         if (evt.RequestId is { } reqId && reqId != Guid.Empty)
                         {
                             PendingApproval = new PendingApprovalRequest(
@@ -616,6 +720,7 @@
                     case "tool_approval_resolved":
                         // Phase B: Approval resolved — add bubble to messages and clear pending card
                         _pendingApprovalTool = string.Empty;
+                        _currentToolApprovalSource = evt.DecisionSource;
                         PendingApproval = null;
                         if (evt.ToolName is not null)
                         {
@@ -637,6 +742,8 @@
                     case "tool_start":
                         _pendingApprovalTool = string.Empty;
                         _currentToolName = evt.Content ?? evt.ToolName ?? string.Empty;
+                        if (!string.IsNullOrWhiteSpace(evt.DecisionSource))
+                            _currentToolApprovalSource = evt.DecisionSource;
                         if (_consolePanel != null)
                         {
                             var startDetails = $"Tool: {_currentToolName}\n" +
@@ -646,13 +753,30 @@
                         await InvokeAsync(StateHasChanged);
                         break;
                     case "tool_complete":
+                        var completedToolName = evt.ToolName ?? _currentToolName;
+                        var approvalSource = ResolveToolApprovalSource(
+                            evt.DecisionSource,
+                            _currentToolApprovalSource,
+                            _currentToolHadApprovalRequest);
+
+                        _messages.Add(new ChatDisplayMessage(
+                            Role: "system",
+                            Content: $"Tool executed: {completedToolName}",
+                            Timestamp: DateTime.Now,
+                            MessageType: "ToolExecution",
+                            ToolName: completedToolName,
+                            ToolDecidedBy: approvalSource));
+
                         if (_consolePanel != null)
                         {
-                            var completeDetails = $"Tool: {_currentToolName}\n" +
+                            var completeDetails = $"Tool: {completedToolName}\n" +
+                                $"Approval flow: {approvalSource}\n" +
                                 $"Completed: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}";
-                            await _consolePanel.AddEntry($"{_currentToolName} completed", "success", completeDetails);
+                            await _consolePanel.AddEntry($"{completedToolName} completed", "success", completeDetails);
                         }
                         _currentToolName = string.Empty;
+                        _currentToolHadApprovalRequest = false;
+                        _currentToolApprovalSource = null;
                         _toolCompleteCount++;
                         await InvokeAsync(StateHasChanged);
                         break;
@@ -703,6 +827,8 @@
             _streamingContent = string.Empty;
             _currentToolName = string.Empty;
             _pendingApprovalTool = string.Empty;
+            _currentToolHadApprovalRequest = false;
+            _currentToolApprovalSource = null;
             _streamCts?.Dispose();
             _streamCts = null;
             await InvokeAsync(StateHasChanged);
@@ -717,6 +843,8 @@
 
     public async ValueTask DisposeAsync()
     {
+        await _componentCts.CancelAsync();
+        _componentCts.Dispose();
         _streamCts?.Cancel();
         _streamCts?.Dispose();
     }
@@ -743,6 +871,7 @@
         DateTime? ToolDecidedAt = null);
     
     private sealed record SessionDto(Guid Id, string Title, DateTime CreatedAt, DateTime UpdatedAt);
+    private sealed record AutoRenameResponseDto(string? GeneratedName, bool Updated);
     private sealed record AgentProfileDto(string Name, string? DisplayName, string? Provider, bool IsDefault);
     private sealed record ProviderInfoDto(string Name, string ProviderType, string? DisplayName, string? Model, string? DeploymentName);
     private sealed record MessageDto(
@@ -771,5 +900,19 @@
         public bool? Approved { get; init; }
         public string? DecisionSource { get; init; }
         public DateTime? DecidedAt { get; init; }
+    }
+
+    private static string ResolveToolApprovalSource(string? eventDecisionSource, string? cachedDecisionSource, bool hadApprovalRequest)
+    {
+        var source = !string.IsNullOrWhiteSpace(eventDecisionSource)
+            ? eventDecisionSource
+            : cachedDecisionSource;
+
+        if (!string.IsNullOrWhiteSpace(source))
+            return source!;
+
+        return hadApprovalRequest
+            ? "manual-approval"
+            : "auto-approved-or-not-required";
     }
 }

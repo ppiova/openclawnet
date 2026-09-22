@@ -4,23 +4,23 @@ namespace OpenClawNet.PlaywrightTests;
 
 /// <summary>
 /// Screenshot capture test for the Tools manual (20-tools.md).
-/// Captures the Tools catalog page, the Tool Log page, and a focused
+/// Captures the Tools catalog page and a focused
 /// shot of each individual tool card (file_system, shell, web_fetch, schedule).
 /// </summary>
-[Collection("AppHost")]
+[Collection("AspireHost")]
 [Trait("Category", "Screenshots")]
-public class ToolsScreenshotsTest : PlaywrightTestBase
+public class ToolsScreenshotsTest : AspireHostPlaywrightTestBase
 {
     private readonly string _screenshotDir;
 
-    public ToolsScreenshotsTest(AppHostFixture fixture) : base(fixture)
+    public ToolsScreenshotsTest(AspireHostFixture fixture) : base(fixture)
     {
         var repoRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", ".."));
         _screenshotDir = Path.Combine(repoRoot, "docs", "manuals", "images", "20-tools");
         Directory.CreateDirectory(_screenshotDir);
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task CaptureToolsScreenshots()
     {
         await WithScreenshotOnFailure(async () =>
@@ -58,14 +58,7 @@ public class ToolsScreenshotsTest : PlaywrightTestBase
                 }
             }
 
-            // Step 4: Tool Log page — shows prior tool invocations
-            await Page.GotoAsync($"{Fixture.WebBaseUrl}/tool-log", new PageGotoOptions
-            {
-                WaitUntil = WaitUntilState.NetworkIdle,
-                Timeout = 30_000
-            });
-            await Page.WaitForTimeoutAsync(2_000);
-            await CaptureScreenshotAsync($"{idx:D2}-tool-log.png", "Tool Log page — history of tool invocations");
+            // Step 4 removed: Tool Log page was non-functional and has been removed
         });
     }
 

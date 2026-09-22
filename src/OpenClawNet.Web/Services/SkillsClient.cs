@@ -82,6 +82,56 @@ public sealed class SkillsClient
         await EnsureSuccessOrThrowAsync(response, ct).ConfigureAwait(false);
     }
 
+    /// <summary>POST /api/skills/bulk-delete — delete multiple skills at once with partial failure support.</summary>
+    public async Task<BulkDeleteResult> BulkDeleteAsync(string[] names, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(names);
+        var response = await _http.PostAsJsonAsync("api/skills/bulk-delete", new { Names = names }, ct).ConfigureAwait(false);
+        
+        // For bulk delete, we accept both 200 (partial/full success) and 400 (all failed)
+        // and return the structured result either way
+        BulkDeleteResult? result = null;
+        try
+        {
+            result = await response.Content.ReadFromJsonAsync<BulkDeleteResult>(ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            // If we can't parse the result, throw a generic exception
+        }
+
+        if (result is null)
+        {
+            throw new InvalidOperationException("Bulk delete returned a null or unparseable body.");
+        }
+
+        return result;
+    }
+
+    /// <summary>GET /api/skills/storage-paths — returns system and installed directory paths.</summary>
+    public async Task<SkillsStoragePathsDto?> GetStoragePathsAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _http.GetAsync("api/skills/storage-paths", ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return null;
+            return await response.Content.ReadFromJsonAsync<SkillsStoragePathsDto>(ct).ConfigureAwait(false);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>POST /api/skills/open-folder?layer=installed — opens the skills folder in the host OS file explorer.</summary>
+    public async Task<bool> OpenFolderAsync(string layer = "installed", CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _http.PostAsync(
+                $"api/skills/open-folder?layer={Uri.EscapeDataString(layer)}", null, ct).ConfigureAwait(false);
+            return response.IsSuccessStatusCode;
+        }
+        catch { return false; }
+    }
+
     /// <summary>GET /api/skills/changes-since/{snapshotId} — diff against a pinned snapshot.</summary>
     public async Task<SkillsChangesDto> GetChangesSinceAsync(string snapshotId, CancellationToken ct = default)
     {

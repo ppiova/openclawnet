@@ -10,8 +10,8 @@
     <InternalsVisibleTo Include="OpenClawNet.UnitTests" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="CommunityToolkit.Aspire.Microsoft.Data.Sqlite" Version="13.1.1" />
-    <PackageReference Include="Cronos" Version="0.12.0" />
+    <PackageReference Include="CommunityToolkit.Aspire.Microsoft.Data.Sqlite" Version="13.4.0" />
+    <PackageReference Include="Cronos" Version="0.13.0" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\OpenClawNet.ServiceDefaults\OpenClawNet.ServiceDefaults.csproj" />

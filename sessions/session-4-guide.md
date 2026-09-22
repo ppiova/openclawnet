@@ -1,476 +1,356 @@
-# Session 4: Automation + Cloud
+# Session 4 Guide — Deploy, Operate & Scale
 
-**Duration:** 50 minutes | **Level:** Intermediate .NET
+## Objective
 
----
+Run Session 4 with a complete progression from new capabilities to operations at scale, with **live demos immediately after each main topic** (skills, secrets, jobs, deploy).
 
-## Overview
+**Demo Flow:**
+1. File-based skills → **DEMO 1: Edit skill live**
+2. Secrets Vault → **DEMO 2: Add secret, app picks it up**
+3. Job scheduling → **DEMO 3: Create job, watch metadata**
+4. Deploy with Aspire → **DEMO 4: aspire describe, show readiness**
 
-Your agent works locally. Users love it. Now three production challenges stand between you and a real platform:
-
-1. **Cloud providers** — Local LLMs (Ollama, Foundry Local) are great for dev, but production needs GPT-4o, SLAs, and team-wide access.
-2. **Automated scheduling** — The agent should run jobs in the background without a user sitting there.
-3. **Testing** — You can't ship what you can't test. 24 tests prove the architecture works.
-
-This is the **series finale**. By the end of this session, every piece connects: chat, tools, skills, memory, scheduling, health checks, and cloud providers — a complete AI agent platform built with .NET.
+Primary deployment reference: <https://aspire.dev/deployment/>
 
 ---
 
-## Before the Session
+## Recommended Agenda (60–75 min)
 
-### Prerequisites
+| Time | Section | Duration |
+|------|---------|----------|
+| 0:00–5:00 | Welcome and goals | 5 min |
+| 5:00–9:00 | What's new in OpenClaw .NET | 4 min |
+| 9:00–13:00 | File-based skills | 4 min |
+| **13:00–15:00** | **DEMO 1: Skills** | **2 min** |
+| 15:00–19:00 | Secrets Vault | 4 min |
+| **19:00–21:00** | **DEMO 2: Vault** | **2 min** |
+| 21:00–25:00 | Job scheduling | 4 min |
+| **25:00–27:00** | **DEMO 3: Jobs** | **2 min** |
+| 27:00–29:00 | Transition to readiness | 2 min |
+| 29:00–34:00 | Deploy with Aspire | 5 min |
+| **34:00–36:00** | **DEMO 4: Deploy** | **2 min** |
+| 36:00–40:00 | Observe | 4 min |
+| 40:00–44:00 | Automate | 4 min |
+| 44:00–48:00 | Secure | 4 min |
+| 48:00–51:00 | Extend (skills) | 3 min |
+| 51:00–55:00 | Operate at scale | 4 min |
+| 55:00–60:00 | Q&A and wrap-up | 5 min |
 
-- Session 3 complete and working
-- .NET 10 SDK, VS Code or Visual Studio
-- Local LLM running (Ollama with `llama3.2` or Foundry Local)
-- Understanding of: background services, HTTP clients, unit testing
-- **Optional:** Azure account with Azure OpenAI or Foundry access
-
-### Starting Point
-
-- The `session-3-complete` code
-- Full agent orchestration with skills and memory
-- All tools implemented and working
-- Database with conversation history
-
-### Git Checkpoint
-
-**Starting tag:** `session-4-start` (alias: `session-3-complete`)
-**Ending tag:** `session-4-complete`
-
----
-
-## Stage 1: Cloud Providers (12 min)
-
-### Concepts
-
-**Why cloud? Beyond local LLMs.**
-Local LLMs like Ollama and Foundry Local are perfect for development — free, local, no credentials. But production needs more:
-- **GPT-4o quality** — Better reasoning, longer context, tool calling reliability
-- **SLAs** — 99.9% uptime guarantees, not "my laptop is on"
-- **Team sharing** — One endpoint, many developers, centralized billing
-- **Compliance** — Data residency, audit logs, enterprise security
-
-**IModelClient polymorphism.**
-The magic: one interface, three implementations. Your agent code doesn't change — only the DI registration does.
-
-```csharp
-public interface IModelClient
-{
-    string ProviderName { get; }
-    Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken ct);
-    IAsyncEnumerable<ChatResponseChunk> StreamAsync(ChatRequest request, CancellationToken ct);
-    Task<bool> IsAvailableAsync(CancellationToken ct);
-}
-```
-
-**Provider configuration with Options pattern.**
-Each provider has its own options class (`AzureOpenAIOptions`, `FoundryOptions`), bound from `appsettings.json` or environment variables. Clean separation of config from code.
-
-### Code Walkthrough
-
-#### AzureOpenAIModelClient (137 LOC)
-
-```csharp
-public sealed class AzureOpenAIModelClient : IModelClient
-{
-    public string ProviderName => "azure-openai";
-
-    public AzureOpenAIModelClient(
-        IOptions<AzureOpenAIOptions> options,
-        ILogger<AzureOpenAIModelClient> logger) { ... }
-
-    public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken ct)
-    {
-        // Uses Azure.AI.OpenAI SDK
-        // Maps ChatMessage → OpenAI.Chat.ChatMessage
-        // Returns structured ChatResponse with usage info
-    }
-
-    public async IAsyncEnumerable<ChatResponseChunk> StreamAsync(...)
-    {
-        // SDK streaming with await foreach
-        // Yields ChatResponseChunk per token
-    }
-}
-```
-
-**Key points:**
-- Uses the official `Azure.AI.OpenAI` NuGet package
-- `MapMessages()` converts OpenClawNet's `ChatMessage` to SDK types
-- Streaming uses `IAsyncEnumerable` — same pattern as the local LLM client
-- Configuration via `AzureOpenAIOptions`: Endpoint, ApiKey, DeploymentName, Temperature, MaxTokens
-
-#### FoundryModelClient (195 LOC)
-
-```csharp
-public sealed class FoundryModelClient : IModelClient
-{
-    public string ProviderName => "foundry";
-
-    public FoundryModelClient(
-        HttpClient httpClient,
-        IOptions<FoundryOptions> options,
-        ILogger<FoundryModelClient> logger) { ... }
-
-    public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken ct)
-    {
-        // Custom HTTP POST to Foundry endpoint
-        // Manual JSON serialization/deserialization
-        // Maps Foundry-specific DTOs to ChatResponse
-    }
-}
-```
-
-**Key points:**
-- No SDK — raw `HttpClient` with custom DTOs (`FoundryChatResponse`, `FoundryChoice`, etc.)
-- `BuildPayload()` constructs the request body
-- `EnsureConfigured()` validates endpoint/key before calls
-- Shows what "different API shape" means in practice
-
-#### DI Registration — Switching Providers
-
-```csharp
-// In Program.cs or startup — pick ONE:
-
-// Option A: Local development
-services.AddOllama(o => o.Model = "llama3.2");
-
-// Option B: Azure OpenAI
-services.AddAzureOpenAI(o => {
-    o.Endpoint = config["AzureOpenAI:Endpoint"]!;
-    o.ApiKey = config["AzureOpenAI:ApiKey"]!;
-    o.DeploymentName = "gpt-4o";
-});
-
-// Option C: Microsoft Foundry
-services.AddFoundry(o => {
-    o.Endpoint = config["Foundry:Endpoint"]!;
-    o.ApiKey = config["Foundry:ApiKey"]!;
-    o.Model = "gpt-4o";
-});
-```
-
-All three register as `IModelClient`. The agent, prompt composer, and tool loop never know which provider is active.
-
-### Live Demo
-
-1. Show the current local LLM-based chat working
-2. Switch to Azure OpenAI (if available) by changing DI registration
-3. Same chat interface, same tools, same skills — different cloud provider
-4. Compare response quality and speed side by side
-5. **Fallback:** If no Azure, show the configuration and explain — the code is the same either way
+**Total:** 60 min (demos included)  
+**Buffer:** 5–15 min for Q&A spillover or demo delays
 
 ---
 
-## Stage 2: Scheduling + Health (12 min)
+## Before You Start: Pre-Session Checklist
 
-### Concepts
+### 30 Minutes Before Session
 
-**BackgroundService pattern.**
-ASP.NET Core's `BackgroundService` runs tasks alongside your web app. No separate process, no Windows Service — just override `ExecuteAsync` and loop.
+**Aspire Services:**
+- [ ] Start Aspire AppHost: `aspire run` in terminal
+- [ ] Verify dashboard accessible: `http://localhost:15888` (or configured port)
+- [ ] Check all services green: agent service, job scheduler, vault integration
 
-**Cron-based job scheduling.**
-Users (or the agent itself) create jobs with cron expressions. The scheduler checks every 30 seconds for due jobs and runs them.
+**Agent Service:**
+- [ ] Health endpoint responding: `curl http://localhost:5000/health` → 200 OK
+- [ ] Sample skill loaded: `skills/demo/weather-lookup.md` exists and is valid
+- [ ] Logs visible in terminal or Aspire dashboard
 
-**Health checks + Aspire integration.**
-Production apps need to answer: "Are you healthy?" ASP.NET Core health checks provide `/health` and `/alive` endpoints. Aspire Dashboard shows everything in one view.
+**Secrets Vault:**
+- [ ] Vault connectivity verified: `dotnet user-secrets list` or Azure Key Vault portal access
+- [ ] Demo secret name chosen: `DemoApiKey` (not yet added — will add during demo)
+- [ ] Application configured to read vault secrets at startup
 
-### Code Walkthrough
+**Job Scheduler:**
+- [ ] Job management UI or API accessible: `/jobs` endpoint or dashboard
+- [ ] Sample job definition ready: "Demo Job — runs every 1 min"
+- [ ] Job execution logs visible
 
-#### JobSchedulerService
+**Deployment Artifacts:**
+- [ ] Build successful: `dotnet build` completes without errors
+- [ ] Aspire deployment manifest generated: `aspire deploy --dry-run` succeeds
+- [ ] (Optional) Azure subscription configured if doing live deploy
 
-```csharp
-public class JobSchedulerService : BackgroundService
-{
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
-            // Query DB: jobs where IsActive && NextRunTime <= now
-            // For each due job:
-            //   Create JobRun (Status=Running)
-            //   Call orchestrator.RunAsync with synthetic request
-            //   Update JobRun (Status=Success/Failed)
-            //   Calculate NextRunTime from cron
-        }
-    }
-}
-```
+**Fallback Plan:**
+- [ ] Screenshots saved in `sessions/session-4/fallback-screenshots/`:
+  - `demo1-skill-edit.png` (skill file edit → reload → execution)
+  - `demo2-vault-secret.png` (vault UI with secret added)
+  - `demo3-job-status.png` (job status page with execution history)
+  - `demo4-deploy-readiness.png` (`aspire describe` output or Azure portal)
+- [ ] Fallback screenshots open in separate folder for quick access
 
-**Key points:**
-- Polls every 30 seconds — simple, reliable, no external scheduler needed
-- Creates `JobRun` records for audit trail
-- Uses the same `IAgentOrchestrator` as the chat — full tool/skill access
-- Graceful shutdown via `CancellationToken`
+### 5 Minutes Before Session
 
-#### SchedulerTool — The Agent Schedules Itself
+**Terminals & Browser:**
+- [ ] Terminal 1: Aspire AppHost logs running
+- [ ] Terminal 2: Agent service logs visible
+- [ ] Terminal 3: Job scheduler logs (if separate)
+- [ ] Browser Tab 1: Aspire dashboard (`http://localhost:15888`)
+- [ ] Browser Tab 2: Job management UI or API docs
+- [ ] Browser Tab 3: Azure portal (if live deploy planned)
 
-```csharp
-public sealed class SchedulerTool : ITool
-{
-    public string Name => "schedule";
-    // Actions: "create", "list", "cancel"
+**Editor:**
+- [ ] VS Code open with `skills/demo/weather-lookup.md` ready to edit
+- [ ] Editor visible on screen share (large font for audience)
 
-    private async Task<ToolResult> CreateJobAsync(ToolInput input, ...)
-    {
-        // Parse: name, prompt, runAt (one-time) or cron (recurring)
-        // Store ScheduledJob in database
-        // Return confirmation with next run time
-    }
-}
-```
-
-This is powerful: a user says "Remind me every morning at 9 AM to check my calendar" and the agent calls the schedule tool to create a recurring job.
-
-#### ServiceDefaults — Health + Telemetry
-
-```csharp
-public static TBuilder AddServiceDefaults<TBuilder>(this TBuilder builder)
-    where TBuilder : IHostApplicationBuilder
-{
-    builder.ConfigureOpenTelemetry();   // Metrics, tracing, logging
-    builder.AddDefaultHealthChecks();   // /health, /alive
-    // Service discovery, resilience handlers
-}
-```
-
-**Health endpoints:**
-- `GET /health` — Readiness probe (database, model provider)
-- `GET /alive` — Liveness probe (process is running)
-
-**OpenTelemetry:**
-- ASP.NET Core metrics (request duration, error rates)
-- HttpClient metrics (outbound call tracking)
-- Runtime metrics (GC, thread pool)
-- OTLP exporter for Aspire Dashboard
-
-### Live Demo
-
-1. Show the Aspire Dashboard — all services visible
-2. Schedule a job via the API: "Check weather every hour"
-3. Show the job in the database
-4. Hit `GET /health` — show the JSON response
-5. Point out OpenTelemetry traces in Aspire
+**Final Checks:**
+- [ ] Run demo flow once: skill edit → vault add → job create → aspire describe (takes ~3 min)
+- [ ] Verify all services still healthy after test run
+- [ ] Reset demo state: remove demo secret, delete demo job, revert skill edits
 
 ---
 
-## Stage 3: Testing + Production (12 min)
+## Live Demo Walkthroughs
 
-### Concepts
+### DEMO 1: File-Based Skills (13:00–15:00 | 2 min)
 
-**Test pyramid: unit → integration → E2E.**
-- **Unit tests (23):** Test individual components in isolation. Fast, reliable, no external dependencies.
-- **Integration tests (1):** Test components working together. Uses real (in-memory) database.
-- **E2E:** Manual demo — chat through the full flow.
+**Context:** Immediately after explaining file-based skills. Audience understands theory — now show practice.
 
-**What to mock.**
-- `IModelClient` — Don't call real AI in tests
-- `IDbContextFactory` — Use EF Core in-memory provider
-- `ITool` — Fake tools for executor tests
-- `ISkillLoader` — Fake skill loader for composer tests
+**Demo Goal:** Edit a skill file, reload it, and show updated behavior in action.
 
-**Production checklist:**
-- ✅ Health checks responding
-- ✅ All tests passing
-- ✅ Provider switching works
-- ✅ Scheduled jobs executing
-- ✅ OpenTelemetry exporting
-- ✅ Error handling graceful
+**Talking Points (before demo):**
+- "Let's see this in action — I'll edit a skill file and reload it live"
+- "This is the dev workflow — in production, this would be a PR review + merge"
 
-### Code Walkthrough
+**Steps:**
+1. **Show skill file** (30 sec)
+   - Open `skills/demo/weather-lookup.md` in VS Code
+   - Read aloud one instruction or tool definition
+   - "This skill looks up weather for a given city"
 
-#### PromptComposerTests — Verify Skill Injection
+2. **Edit skill** (20 sec)
+   - Change prompt instruction: "Always include temperature in Celsius AND Fahrenheit"
+   - Save file (Ctrl+S)
+   - "Just saved — now let's reload"
 
-```csharp
-[Fact]
-public async Task ComposeAsync_IncludesActiveSkills()
-{
-    // Arrange: FakeSkillLoader returns "code-review" skill
-    // Act: composer.ComposeAsync(context)
-    // Assert: system prompt contains skill name and content
-}
-```
+3. **Reload skill** (30 sec)
+   - Trigger skill reload: API call (`POST /skills/reload`) or hot-reload mechanism
+   - Show terminal output: "Skill 'weather-lookup' reloaded successfully"
 
-4 tests covering: system prompt presence, skill injection, session summary, conversation history.
+4. **Execute skill** (40 sec)
+   - Call agent with prompt: "What's the weather in Seattle?"
+   - Show response: includes both Celsius and Fahrenheit (proving edit worked)
+   - "See — updated behavior without redeploying the entire app"
 
-#### ToolExecutorTests — Approval Policy Enforcement
+**Watch For:**
+- Skill file is readable on screen share (large font)
+- Reload completes within 5 sec (if slower, explain "normally instant")
+- Agent response clearly shows the edit took effect
 
-```csharp
-[Fact]
-public async Task ExecuteAsync_ReturnsFail_WhenToolNotFound()
-{
-    // Verifies graceful failure for unknown tools
-}
-
-[Fact]
-public async Task ExecuteAsync_CallsTool_WhenFound()
-{
-    // Registers SuccessTool, executes, verifies output
-}
-```
-
-3 tests covering: missing tool handling, successful execution, batch execution.
-
-#### SkillParserTests — YAML Parsing Edge Cases
-
-```csharp
-[Fact]
-public void Parse_WithValidFrontmatter_ExtractsMetadata()
-{
-    // Full YAML: name, description, category, tags
-    // Verifies all fields extracted correctly
-}
-
-[Fact]
-public void Parse_WithoutFrontmatter_UsesFileName()
-{
-    // Plain content → filename becomes skill name
-}
-```
-
-4 tests covering: valid frontmatter, no frontmatter, disabled flag, empty content.
-
-#### ConversationStoreTests — EF Core In-Memory
-
-```csharp
-public class ConversationStoreTests : IDisposable
-{
-    // Uses TestDbContextFactory with in-memory database
-    // Each test gets a fresh Guid-named database
-
-    [Fact]
-    public async Task AddMessage_IncrementsOrderIndex()
-    {
-        // Adds 2 messages, verifies OrderIndex: 0, 1
-    }
-}
-```
-
-7 tests covering: create, get, add message, order index, list, delete, update title.
-
-#### ToolRegistryTests — Registration + Lookup
-
-5 tests covering: register, case-insensitive lookup, not found, get all, manifest.
-
-### Live Demo
-
-1. Run `dotnet test` → all 24 pass (23 unit + 1 integration)
-2. Show test output with categories
-3. Point out test patterns: Arrange/Act/Assert, fake implementations, in-memory DB
-
-### 🤖 Copilot Moment — Write a New Test
-
-**Context:** `ToolRegistryTests.cs` is open in the editor.
-
-**Prompt to Copilot:**
-> Write a new unit test for ToolRegistry that verifies registering a tool with a duplicate name overwrites the previous registration. Register two different FakeTool instances with the same name, then verify GetTool returns the second one.
-
-**Expected:** Copilot generates a `[Fact]` test method that:
-- Creates two `FakeTool` instances with the same `Name`
-- Registers both
-- Asserts `GetTool` returns the second instance
+**Fallback (if skill reload fails):**
+- Show `fallback-screenshots/demo1-skill-edit.png`
+- Say: "We have a hot-reload hiccup — here's what you'd see: edit, save, reload, and the agent immediately uses the new behavior"
+- **Time saved:** 30 sec
 
 ---
 
-## Closing (14 min) — SERIES FINALE
+### DEMO 2: Secrets Vault (19:00–21:00 | 2 min)
 
-### Full Platform Demo (5 min)
+**Context:** Immediately after explaining secrets vault. Audience understands separation of duties — now show secret addition flow.
 
-Walk through the entire platform end-to-end:
-1. Start the app with Aspire
-2. Open the chat — send a message (Session 1)
-3. Use a tool — "What files are in the project?" (Session 2)
-4. Toggle a skill — enable "code-review" mode (Session 3)
-5. Schedule a job — "Remind me in 5 minutes" (Session 4)
-6. Check health — `GET /health` (Session 4)
-7. Show Aspire Dashboard — all services, traces, metrics
+**Demo Goal:** Add a secret to the vault and show the app resolve it at runtime.
 
-### Series Recap (4 min)
+**Talking Points (before demo):**
+- "Let's add a secret to the vault and watch the app use it"
+- "Developers never see production secrets — only secret names"
 
-| Session | Topic | What We Built |
-|---------|-------|--------------|
-| **1** | Scaffolding + Local Chat | Aspire host, local LLM integration, gateway, chat UI |
-| **2** | Tools + Agent Workflows | Tool interface, registry, executor, approval policies, tool loop |
-| **3** | Skills + Memory | Markdown skills, YAML parsing, conversation summarization, semantic search |
-| **4** | Automation + Cloud | Cloud providers, job scheduling, health checks, testing |
+**Steps:**
+1. **Show vault UI** (20 sec)
+   - Open vault UI (dotnet user-secrets or Azure Key Vault portal)
+   - List existing secrets: "ConnectionString", "ApiKey", etc.
+   - "Here are the secrets our app can access"
 
-### Architecture Diagram
+2. **Add new secret** (30 sec)
+   - Add: `DemoApiKey = "secret-value-12345"`
+   - Command: `dotnet user-secrets set "DemoApiKey" "secret-value-12345"` (or via portal)
+   - Show confirmation: "Secret 'DemoApiKey' added"
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    OpenClawNet Platform                  │
-├──────────┬──────────┬──────────┬───────────────────────────┤
-│  Web UI  │ REST API │  Aspire  │     Health Checks       │
-├──────────┴──────────┴──────────┴───────────────────────────┤
-│                   Agent Orchestrator                      │
-│         ┌──────────────────────────────┐                  │
-│         │     Prompt Composer          │                  │
-│         │  (System + Skills + Memory)  │                  │
-│         └──────────────────────────────┘                  │
-├──────────┬──────────┬──────────┬───────────────────────────┤
-│   Tools  │  Skills  │  Memory  │     Scheduler           │
-│ Registry │  Loader  │  Store   │  BackgroundService      │
-├──────────┴──────────┴──────────┴───────────────────────────┤
-│                   Model Abstraction                       │
-│         ┌────────┬──────────┬──────────┐                  │
-│         │ Ollama │ Azure AI │ Foundry  │                  │
-│         └────────┴──────────┴──────────┘                  │
-├────────────────────────────────────────────────────────────┤
-│              Storage (EF Core + SQLite)                   │
-└────────────────────────────────────────────────────────────┘
-```
+3. **App picks up secret** (30 sec)
+   - Restart or hot-reload agent service (if hot-reload supported)
+   - Show app logs: "DemoApiKey resolved successfully" (value NOT logged)
+   - "App fetched the secret at startup — but we never hardcoded it"
 
-### Where to Go from Here
+4. **Verify secret in use** (40 sec)
+   - Call API endpoint that uses `DemoApiKey`: `GET /api/demo`
+   - Show response: API call succeeded (proving secret was used)
+   - "In production, operators rotate secrets in vault — app picks up changes on restart"
 
-- **Custom tools:** Build domain-specific tools (Jira, GitHub, Slack)
-- **Domain skills:** Create specialized skill packs for your team
-- **Azure deployment:** Deploy to Azure Container Apps with Aspire
-- **Advanced memory:** RAG with vector search, long-term knowledge
-- **Multi-agent:** Agent-to-agent communication patterns
-- **GitHub Copilot integration:** Use Copilot to extend the platform itself
+**Watch For:**
+- Vault UI is visible on screen share
+- Secret addition completes quickly (< 5 sec)
+- App logs clearly show "secret resolved" (not the actual value)
 
-### Thank You + Q&A
-
-- Repository: `github.com/elbruno/openclawnet`
-- Series: Microsoft Reactor — OpenClawNet
-- Built with: .NET 10, Aspire, GitHub Copilot, Local LLMs (Ollama / Foundry Local)
+**Fallback (if vault connection fails):**
+- Show `fallback-screenshots/demo2-vault-secret.png`
+- Say: "Vault is being slow — here's the flow: add secret in vault UI, app restarts, logs show 'secret resolved', and API calls work"
+- **Time saved:** 30 sec
 
 ---
 
-## After the Session
+### DEMO 3: Job Scheduling (25:00–27:00 | 2 min)
 
-### What Now Works
+**Context:** Immediately after explaining job scheduling. Audience understands recurring + one-time jobs — now show job creation and status tracking.
 
-- ✅ Cloud provider switching (Local LLM → Azure OpenAI → Foundry)
-- ✅ Background job scheduling with cron expressions
-- ✅ Health check endpoints (`/health`, `/alive`)
-- ✅ OpenTelemetry metrics and tracing
-- ✅ 24 tests passing (23 unit + 1 integration)
-- ✅ Complete AI agent platform — production-ready
+**Demo Goal:** Create a recurring job and watch its metadata update in real time.
 
-### Key Concepts Covered
+**Talking Points (before demo):**
+- "Let's create a job and watch its metadata update in real time"
+- "This is the foundation for unattended agent automation"
 
-1. `IModelClient` polymorphism — one interface, multiple cloud providers
-2. Options pattern for provider configuration
-3. `BackgroundService` for long-running tasks
-4. Cron-based job scheduling with audit trail
-5. ASP.NET Core health checks and Aspire integration
-6. OpenTelemetry for observability
-7. Unit testing patterns: fakes, in-memory DB, Arrange/Act/Assert
-8. Production readiness checklist
+**Steps:**
+1. **Show job management UI** (20 sec)
+   - Open job management UI or API docs: `/jobs` endpoint
+   - List existing jobs: "Data refresh — runs daily", "Report generator — runs weekly"
+   - "Here are our currently scheduled jobs"
 
-### Git Checkpoint
+2. **Create new job** (30 sec)
+   - Create: "Demo Job — runs every 1 min"
+   - Payload: `{ "name": "Demo Job", "schedule": "*/1 * * * *", "skill": "weather-lookup" }`
+   - Submit job via UI or API call: `POST /jobs`
+   - Show confirmation: "Job 'Demo Job' created, next run in 60 sec"
 
-**Tag:** `session-4-complete`
+3. **Watch first execution** (40 sec)
+   - Wait for first execution (or trigger manually if time-sensitive)
+   - Show status update: "Last run: 2 sec ago, Status: Success"
+   - Refresh job page to show updated metadata
 
-**Files covered:**
-- `src/OpenClawNet.Models.AzureOpenAI/` — Azure OpenAI client
-- `src/OpenClawNet.Models.Foundry/` — Foundry client
-- `src/OpenClawNet.Models.Abstractions/` — IModelClient interface
-- `src/OpenClawNet.Tools.Scheduler/` — SchedulerTool
-- `src/OpenClawNet.Gateway/Services/JobSchedulerService.cs` — Background scheduler
-- `src/OpenClawNet.ServiceDefaults/` — Health checks + telemetry
-- `tests/OpenClawNet.UnitTests/` — 23 unit tests
-- `tests/OpenClawNet.IntegrationTests/` — 1 integration test
+4. **Show execution history** (30 sec)
+   - Click into job details: execution history table
+   - Show: run timestamp, duration, status, logs
+   - "Full operational visibility — you know when it ran, if it failed, and why"
+
+**Watch For:**
+- Job creation completes within 5 sec
+- First execution happens within 60 sec (or trigger manually)
+- Status updates are visible without manual refresh (or refresh explicitly)
+
+**Fallback (if job scheduler is slow):**
+- Show `fallback-screenshots/demo3-job-status.png`
+- Say: "Scheduler is lagging — here's what you'd see: create job, job executes on schedule, status page shows last run, next run, and execution history"
+- **Time saved:** 30 sec
+
+---
+
+### DEMO 4: Deploy Readiness (34:00–36:00 | 2 min)
+
+**Context:** Immediately after explaining Aspire deployment options. Audience understands target choices — now show readiness validation.
+
+**Demo Goal:** Run `aspire describe` to show app topology and readiness checks, then (optionally) show deployed resources.
+
+**Talking Points (before demo):**
+- "Let's run `aspire describe` and show what deployment readiness looks like"
+- "Aspire validates everything before deployment — no surprises"
+
+**Steps:**
+1. **Run aspire describe** (30 sec)
+   - Command: `aspire describe` (or `dotnet run --project AppHost -- describe`)
+   - Show output: app topology, dependencies, health checks
+   - "Here's our app: agent service, job scheduler, vault integration — all dependencies resolved"
+
+2. **Show readiness checks** (30 sec)
+   - Highlight: "Health: ✓ All services healthy"
+   - Highlight: "Dependencies: ✓ Vault connected, Database ready"
+   - Highlight: "Configuration: ✓ All required settings provided"
+   - "Everything green — ready to deploy"
+
+3. **(Optional) Show deployment manifest** (30 sec)
+   - Command: `aspire deploy --dry-run` or show generated manifest file
+   - "This is what Aspire will provision: Container Apps, Key Vault, Storage, etc."
+   - "Same manifest works for dev, stage, prod — just different environments"
+
+4. **(Optional) Show deployed resources** (40 sec)
+   - If time allows and Azure subscription is configured:
+   - Open Azure portal, show deployed Container Apps
+   - Show health checks green, logs flowing, traces visible
+   - "Post-deploy: everything running, observability automatic"
+
+**Watch For:**
+- `aspire describe` completes within 10 sec
+- Output is readable on screen share (may need to zoom terminal)
+- All health checks show green (if not, explain "this is a dev environment")
+
+**Fallback (if aspire describe fails or is slow):**
+- Show `fallback-screenshots/demo4-deploy-readiness.png`
+- Say: "Command is hanging — here's what a successful readiness check looks like: all services healthy, dependencies resolved, configuration validated, ready to deploy"
+- **Time saved:** 30 sec
+
+---
+
+## Key Messages to Reinforce (Throughout Session)
+
+**After Demos:**
+- "Live demos show you the dev workflow — production adds approval gates and rollback policies"
+- "These features aren't just conveniences — they're operational enablers"
+- "File-based skills + vault + jobs = production-grade agent operations"
+
+**During Operational Sections:**
+- Observe: "Observability is built in, not bolted on"
+- Automate: "Automation reduces toil and improves reliability"
+- Secure: "Security starts with secrets management"
+- Extend: "Skills are code — treat them like code"
+- Scale: "Scale is not just more servers — it's safe, predictable growth"
+
+**Final Recap:**
+- File-based skills turn agent behavior into reviewable assets
+- Vault-backed secrets reduce operational risk and simplify rotation
+- Scheduling moves agent workflows from ad-hoc to reliable automation
+- Aspire gives a consistent application model while deployment target can vary
+- Operations (observe/security/scale) must be designed early, not bolted on
+
+---
+
+## Troubleshooting & Fallback Strategy
+
+### If Any Demo Fails
+
+**Immediate Actions:**
+1. Acknowledge quickly: "We have a [connectivity/timing/config] hiccup here"
+2. Switch to fallback screenshot: "Here's what you'd see when this works"
+3. Walk through screenshot: narrate the steps as if live
+4. Keep moving: "Let's continue — that's the flow you'd follow"
+
+**Total fallback time per demo:** 30 sec (vs. 2 min live)  
+**Time saved if all demos fail:** ~6 min → reallocate to Q&A
+
+### Common Issues & Quick Fixes
+
+**Aspire services not responding:**
+- Check: `curl http://localhost:15888` → if timeout, restart AppHost
+- Fallback: show dashboard screenshot, explain "services would be green here"
+
+**Skill reload not working:**
+- Check: skill file syntax valid (missing bracket, invalid markdown)
+- Fallback: show screenshot of successful reload
+
+**Vault connection timeout:**
+- Check: `dotnet user-secrets list` → if slow, Azure Key Vault may be throttling
+- Fallback: show screenshot of secret addition in vault UI
+
+**Job scheduler lagging:**
+- Check: job execution logs for errors
+- Fallback: show screenshot of job status page with execution history
+
+**Aspire describe slow:**
+- Check: container images built? (`docker images` → should see app images)
+- Fallback: show screenshot of `aspire describe` output
+
+---
+
+## Post-Session Checklist
+
+- [ ] Stop Aspire AppHost: `Ctrl+C` in terminal
+- [ ] Clean up demo artifacts:
+  - Remove demo secret: `dotnet user-secrets remove "DemoApiKey"`
+  - Delete demo job: `DELETE /jobs/demo-job` or via UI
+  - Revert skill edits: `git restore skills/demo/weather-lookup.md`
+- [ ] Archive demo logs for reference: save terminal output to `sessions/session-4/demo-logs/`
+- [ ] Update session retrospective: note what worked, what didn't, timing adjustments
+
+---
+
+## Links & Resources
+
+- **Aspire Deployment Docs:** <https://aspire.dev/deployment/>
+- **Repo:** <https://github.com/elbruno/openclawnet>
+- **Session Materials:** `sessions/session-4/`
+- **Speaker Script:** `sessions/session-4/speaker-script.md`
+- **Slides:** `sessions/session-4/slides.md`

@@ -1,0 +1,242 @@
+using System.Runtime.CompilerServices;
+using Microsoft.Playwright;
+using Xunit;
+
+namespace OpenClawNet.PlaywrightTests;
+
+/// <summary>
+/// Base class for tests that run on <see cref="AspireHostFixture"/> and capture screenshots on failure.
+/// </summary>
+public abstract class AspireHostPlaywrightTestBase : IAsyncLifetime
+{
+    private const string VideoOutputDirectoryEnvVar = "OPENCLAW_PLAYWRIGHT_VIDEO_DIR";
+    private const string ScreenshotOutputDirectoryEnvVar = "OPENCLAW_PLAYWRIGHT_SCREENSHOT_DIR";
+
+    private readonly AspireHostFixture _fixture;
+    private IBrowserContext? _context;
+    private IPage? _page;
+    private string? _startupSkipReason;
+
+    protected AspireHostPlaywrightTestBase(AspireHostFixture fixture)
+    {
+        _fixture = fixture;
+    }
+
+    protected IPage Page
+    {
+        get
+        {
+            EnsureReadyOrSkip();
+            return _page ?? throw new InvalidOperationException("Page not initialized");
+        }
+    }
+
+    /// <summary>Nullable page accessor for helpers that need null-safe access without throwing.</summary>
+    private IPage? PageOrNull => _page;
+
+    protected AspireHostFixture Fixture => _fixture;
+
+    public virtual async Task InitializeAsync()
+    {
+        if (!_fixture.IsReady)
+        {
+            _startupSkipReason =
+                _fixture.StartupSkipReason
+                ?? "Playwright Aspire host fixture did not initialize successfully.";
+            return;
+        }
+
+        var contextOptions = new BrowserNewContextOptions
+        {
+            IgnoreHTTPSErrors = true
+        };
+
+        var videoOutputDirectory = Environment.GetEnvironmentVariable(VideoOutputDirectoryEnvVar);
+        if (!string.IsNullOrWhiteSpace(videoOutputDirectory))
+        {
+            videoOutputDirectory = ResolveOutputDirectory(videoOutputDirectory);
+            Directory.CreateDirectory(videoOutputDirectory);
+            contextOptions.RecordVideoDir = videoOutputDirectory;
+            contextOptions.RecordVideoSize = new RecordVideoSize
+            {
+                Width = 1280,
+                Height = 720
+            };
+            contextOptions.ViewportSize = new ViewportSize
+            {
+                Width = 1280,
+                Height = 720
+            };
+        }
+
+        try
+        {
+            _context = await _fixture.Browser.NewContextAsync(contextOptions);
+            _page = await _context.NewPageAsync();
+            _page.SetDefaultTimeout(30_000);
+        }
+        catch (Exception ex)
+        {
+            _startupSkipReason =
+                "Playwright Aspire host fixture could not start in this environment. " +
+                $"Startup error: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    public virtual async Task DisposeAsync()
+    {
+        if (_page is not null) await _page.CloseAsync();
+        if (_context is not null) await _context.DisposeAsync();
+    }
+
+    protected async Task WithScreenshotOnFailure(Func<Task> testAction, [CallerMemberName] string testMethodName = "")
+    {
+        EnsureReadyOrSkip();
+
+        try
+        {
+            await testAction();
+        }
+        catch (Exception)
+        {
+            await CaptureScreenshotAsync(testMethodName);
+            throw;
+        }
+    }
+
+    private async Task CaptureScreenshotAsync(string testMethodName)
+    {
+        if (_page is null) return;
+
+        try
+        {
+            var className = GetType().Name;
+            var timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            var screenshotDir = Environment.GetEnvironmentVariable(ScreenshotOutputDirectoryEnvVar);
+            if (string.IsNullOrWhiteSpace(screenshotDir))
+            {
+                screenshotDir = Path.Combine("TestResults", "screenshots");
+            }
+            else
+            {
+                screenshotDir = ResolveOutputDirectory(screenshotDir);
+            }
+            var filename = $"{className}_{testMethodName}_{timestamp}.png";
+            var fullPath = Path.Combine(screenshotDir, filename);
+
+            Directory.CreateDirectory(screenshotDir);
+
+            await _page.ScreenshotAsync(new PageScreenshotOptions
+            {
+                Path = fullPath,
+                FullPage = true
+            });
+
+            Console.WriteLine($"Screenshot saved: {fullPath}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Failed to capture screenshot: {ex.Message}");
+        }
+    }
+
+    private static string ResolveOutputDirectory(string path)
+    {
+        if (Path.IsPathFullyQualified(path))
+        {
+            return path;
+        }
+
+        var repoRoot = FindRepositoryRoot(AppContext.BaseDirectory);
+        return Path.GetFullPath(Path.Combine(repoRoot, path));
+    }
+
+    private static string FindRepositoryRoot(string startDirectory)
+    {
+        var directory = new DirectoryInfo(startDirectory);
+        while (directory is not null)
+        {
+            if (Directory.Exists(Path.Combine(directory.FullName, ".git")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return Directory.GetCurrentDirectory();
+    }
+
+    /// <summary>
+    /// Logs a test progress step with timestamp. Writes to stdout AND injects/updates
+    /// a yellow banner at the top of the page so headed runs are watchable.
+    /// </summary>
+    protected async Task LogStepAsync(string message)
+    {
+        EnsureReadyOrSkip();
+
+        var stamp = DateTime.Now.ToString("HH:mm:ss");
+        Console.WriteLine($"[{stamp}] 🔬 {message}");
+        if (PageOrNull is null) return;
+        try
+        {
+            await PageOrNull.EvaluateAsync(@"(text) => {
+                let el = document.getElementById('__e2e_banner__');
+                if (!el) {
+                    el = document.createElement('div');
+                    el.id = '__e2e_banner__';
+                    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;'
+                        + 'background:#ffeb3b;color:#000;font:600 14px/1.4 system-ui,sans-serif;'
+                        + 'padding:8px 16px;border-bottom:2px solid #f57f17;'
+                        + 'box-shadow:0 2px 6px rgba(0,0,0,.2);'
+                        + 'pointer-events:none;';
+                    document.body.appendChild(el);
+                }
+                el.textContent = '🔬 E2E: ' + text;
+            }", message);
+        }
+        catch
+        {
+            // Page navigation can race the eval — non-fatal.
+        }
+    }
+
+    /// <summary>
+    /// Waits for a locator to be visible, ticking every 5s with elapsed time so the
+    /// user can see progress during long LLM-driven waits. Throws TimeoutException on timeout.
+    /// </summary>
+    protected async Task WaitForWithTicksAsync(ILocator locator, int timeoutMs, string what)
+    {
+        EnsureReadyOrSkip();
+
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        var start = DateTime.UtcNow;
+        while (DateTime.UtcNow < deadline)
+        {
+            var remaining = (int)(deadline - DateTime.UtcNow).TotalMilliseconds;
+            var tick = Math.Min(5_000, Math.Max(500, remaining));
+            try
+            {
+                await locator.First.WaitForAsync(new LocatorWaitForOptions { Timeout = tick });
+                var elapsed = (int)(DateTime.UtcNow - start).TotalSeconds;
+                await LogStepAsync($"✅ {what} appeared after {elapsed}s");
+                return;
+            }
+            catch (TimeoutException)
+            {
+                var elapsed = (int)(DateTime.UtcNow - start).TotalSeconds;
+                await LogStepAsync($"⏳ Still waiting for {what}... {elapsed}s elapsed");
+            }
+        }
+        throw new TimeoutException($"Timeout {timeoutMs}ms exceeded waiting for {what}");
+    }
+
+    private void EnsureReadyOrSkip()
+    {
+        Skip.IfNot(
+            _fixture.IsReady,
+            _startupSkipReason
+            ?? _fixture.StartupSkipReason
+            ?? "Playwright Aspire host fixture did not initialize successfully.");
+    }
+}

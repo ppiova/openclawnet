@@ -18,14 +18,14 @@ namespace OpenClawNet.PlaywrightTests;
 /// trait. They DO require the AppHost stack to be running (provided by the
 /// AppHost collection fixture).
 /// </summary>
-[Collection("AppHost")]
-public class ActivityPanelExportTests : PlaywrightTestBase
+[Collection("AspireHost")]
+public class ActivityPanelExportTests : AspireHostPlaywrightTestBase
 {
-    public ActivityPanelExportTests(AppHostFixture fixture) : base(fixture)
+    public ActivityPanelExportTests(AspireHostFixture fixture) : base(fixture)
     {
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task ActivityPanel_HasExportButton_AndSmallerFont()
     {
         await WithScreenshotOnFailure(async () =>
@@ -76,7 +76,7 @@ public class ActivityPanelExportTests : PlaywrightTestBase
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task ActivityPanel_ExportButton_TriggersDownload_WithFullDetails()
     {
         await WithScreenshotOnFailure(async () =>

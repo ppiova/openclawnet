@@ -82,10 +82,35 @@ public sealed class DefaultPromptComposer : IPromptComposer
             systemContent += $"\n\n# User Profile\n{bootstrap.UserMd}";
         }
 
+        // 4.5. Inject Agent Profile instructions (profile-specific persona/behaviour override).
+        // Placed after stable workspace configuration and before session-specific context so
+        // profile settings take precedence over workspace defaults while remaining overridable
+        // by session state. Contents are never logged.
+        if (!string.IsNullOrWhiteSpace(context.ProfileInstructions))
+        {
+            systemContent += $"\n\n# Agent Instructions\n{context.ProfileInstructions}";
+        }
+
         // 5. Add session summary if available
         if (!string.IsNullOrEmpty(context.SessionSummary))
         {
             systemContent += $"\n\n# Previous Conversation Summary\n{context.SessionSummary}";
+        }
+
+        if (context.RetrievedMemories is { Count: > 0 })
+        {
+            var memorySection = new System.Text.StringBuilder();
+            memorySection.AppendLine("# Retrieved Memory");
+            memorySection.AppendLine();
+            memorySection.AppendLine("Relevant long-term memories for this turn:");
+            memorySection.AppendLine();
+
+            foreach (var memory in context.RetrievedMemories)
+            {
+                memorySection.AppendLine($"- [score: {memory.Score:0.000}] {memory.Content}");
+            }
+
+            systemContent += $"\n\n{memorySection}";
         }
 
         messages.Add(new ChatMessage { Role = ChatMessageRole.System, Content = systemContent });

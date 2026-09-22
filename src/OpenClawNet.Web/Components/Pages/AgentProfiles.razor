@@ -109,12 +109,61 @@ else
                                 <span>🗑 Delete @_selected.Count</span>
                             }
                         </button>
+                        <button class="btn btn-outline-primary btn-sm" @onclick="ShowExportForm">
+                            ⬇ Export as Hosted Agent
+                        </button>
                         <button class="btn btn-outline-secondary btn-sm" @onclick="ClearSelection">✕ Deselect all</button>
                     </div>
                 }
                 @if (!string.IsNullOrEmpty(_bulkSkipMessage))
                 {
                     <div class="alert alert-warning py-1 small">@_bulkSkipMessage</div>
+                }
+
+                @if (_showExport)
+                {
+                    <div class="card mb-3">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span>Export Selected Profiles as Hosted Agent</span>
+                            <span class="text-muted small">@_selected.Count selected</span>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-4 mb-3">
+                                    <label class="form-label fw-semibold">Deployment prefix</label>
+                                    <input class="form-control" @bind="_exportNamePrefix" placeholder="openclaw-hosted" />
+                                </div>
+                                <div class="col-md-4 mb-3">
+                                    <label class="form-label fw-semibold">Azure region</label>
+                                    <input class="form-control" @bind="_exportLocation" placeholder="eastus" />
+                                </div>
+                                <div class="col-md-4 mb-3">
+                                    <label class="form-label fw-semibold">Container image</label>
+                                    <input class="form-control" @bind="_exportContainerImage" placeholder="ghcr.io/org/openclaw-agent:latest" />
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-3 mb-3">
+                                    <label class="form-label fw-semibold">Container port</label>
+                                    <input type="number" class="form-control" @bind="_exportContainerPort" min="1" max="65535" />
+                                </div>
+                            </div>
+                            @if (!string.IsNullOrWhiteSpace(_exportMessage))
+                            {
+                                <div class="alert @(_exportSucceeded ? "alert-success" : "alert-danger") py-2 small">@_exportMessage</div>
+                            }
+                            <div class="d-flex gap-2">
+                                <button class="btn btn-primary" @onclick="ExportSelectedAgents" disabled="@_exporting">
+                                    @if (_exporting)
+                                    {
+                                        <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                                    }
+                                    Generate Azure bundle
+                                </button>
+                                <button class="btn btn-outline-secondary" @onclick="CancelExport">Cancel</button>
+                            </div>
+                        </div>
+                    </div>
                 }
 
                 <div style="overflow-x: auto; width: 100%;">
@@ -287,6 +336,17 @@ else
                                     <span> · MaxTokens: @profile.MaxTokens.Value</span>
                                 }
                                 <span> · Tool approval: @(profile.RequireToolApproval ? "Required" : "Auto")</span>
+                                @{
+                                    var retrieval = string.IsNullOrWhiteSpace(profile.RetrievalLevel) ? "Off" : profile.RetrievalLevel;
+                                    var retrievalColor = retrieval.ToLowerInvariant() switch
+                                    {
+                                        "hybrid" => Color.Primary,
+                                        "vectordb" => Color.Info,
+                                        "memoryonly" => Color.Success,
+                                        _ => Color.Secondary,
+                                    };
+                                }
+                                <MudChip T="string" Size="Size.Small" Color="@retrievalColor" Variant="Variant.Outlined" Class="me-1" title="Retrieval level">@retrieval</MudChip>
                                 @if (!string.IsNullOrWhiteSpace(profile.Instructions))
                                 {
                                     var preview = profile.Instructions.Length > 120
@@ -437,6 +497,55 @@ else
                             </div>
                         }
                     </div>
+                    @* ── File-Based Skills ──────────────────────────────── *@
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold">Skills</label>
+                        @if (_skillsLoading)
+                        {
+                            <div class="text-muted small"><span class="spinner-border spinner-border-sm me-1"></span>Loading skills…</div>
+                        }
+                        else if (_availableSkills.Count == 0)
+                        {
+                            <div class="text-muted small">No skills available. Add skills to <code>skills/system/</code> or <code>skills/installed/</code>.</div>
+                        }
+                        else
+                        {
+                            <div class="border rounded p-2 mb-1" style="max-height:200px;overflow-y:auto;">
+                                @foreach (var layerGroup in _availableSkills.GroupBy(s => s.Layer, StringComparer.OrdinalIgnoreCase))
+                                {
+                                    <div class="text-muted small fw-bold mb-1 mt-1 text-uppercase">@layerGroup.Key</div>
+                                    @foreach (var skill in layerGroup)
+                                    {
+                                        var skillName = skill.Name;
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox"
+                                                   id="skill-@skillName"
+                                                   checked="@_form.SelectedSkills.Contains(skillName)"
+                                                   @onchange="e => ToggleSkill(skillName, (bool)(e.Value ?? false))" />
+                                            <label class="form-check-label" for="skill-@skillName">
+                                                <strong>@skill.Name</strong>
+                                                @if (!string.IsNullOrWhiteSpace(skill.Description))
+                                                {
+                                                    <span class="text-muted small ms-1">— @skill.Description</span>
+                                                }
+                                            </label>
+                                        </div>
+                                    }
+                                }
+                            </div>
+                            <div class="d-flex gap-2 mt-1">
+                                <button type="button" class="btn btn-outline-secondary btn-sm"
+                                        @onclick="() => { _form.SelectedSkills = new HashSet<string>(_availableSkills.Select(s => s.Name), StringComparer.Ordinal); }">
+                                    Select all
+                                </button>
+                                <button type="button" class="btn btn-outline-secondary btn-sm"
+                                        @onclick="() => { _form.SelectedSkills = new HashSet<string>(StringComparer.Ordinal); }">
+                                    Clear all
+                                </button>
+                            </div>
+                            <div class="form-text">Skills are physically copied to the agent's storage directory. Unassigned skills are deleted so new agent instances won't load them.</div>
+                        }
+                    </div>
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label fw-semibold">Temperature</label>
@@ -448,6 +557,16 @@ else
                             <input type="number" class="form-control" min="1" max="128000"
                                    @bind="_form.MaxTokens" />
                         </div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label fw-semibold" for="retrievalLevel">Retrieval Level</label>
+                        <select class="form-select" id="retrievalLevel" @bind="_form.RetrievalLevel">
+                            <option value="Off">Off</option>
+                            <option value="MemoryOnly">Memory only</option>
+                            <option value="VectorDb">Vector DB</option>
+                            <option value="Hybrid">Hybrid</option>
+                        </select>
+                        <div class="form-text">Controls whether the agent can use long-term memory retrieval during chat.</div>
                     </div>
                     <div class="mb-3 form-check">
                         <input type="checkbox" class="form-check-input" id="isDefault" @bind="_form.IsDefault"
@@ -490,7 +609,7 @@ else
                         <button class="btn btn-outline-secondary" @onclick="CancelForm">Cancel</button>
                         @if (_isEditing)
                         {
-                            <button class="btn btn-outline-info" @onclick="() => TestAgent(_form.Name)" disabled="@_testing">
+                            <button class="btn btn-outline-info" @onclick="() => TestAgent(_form.Name, useFormOverrides: true)" disabled="@_testing">
                                 @if (_testing && _testingName == _form.Name)
                                 {
                                     <span class="spinner-border spinner-border-sm me-1" role="status"></span>
@@ -538,6 +657,18 @@ else
     private bool _showForm;
     private bool _isEditing;
     private ProfileFormModel _form = new();
+    private bool _showExport;
+    private bool _exporting;
+    private bool _exportSucceeded;
+    private string _exportMessage = string.Empty;
+    private string _exportNamePrefix = "openclaw-hosted";
+    private string _exportLocation = "eastus";
+    private string _exportContainerImage = "ghcr.io/elbruno/openclawnet-hosted-agent:latest";
+    private int _exportContainerPort = 8080;
+
+    // ── Skills assignment state ──────────────────────────────
+    private List<AvailableSkillDto> _availableSkills = new();
+    private bool _skillsLoading;
 
     // ── Bulk selection ──────────────────────────────────────
     private readonly HashSet<string> _selected = new(StringComparer.Ordinal);
@@ -550,7 +681,7 @@ else
     // ── Lifecycle ────────────────────────────────────────────
     protected override async Task OnInitializedAsync()
     {
-        await Task.WhenAll(LoadProfiles(), LoadModelProviders(), LoadToolGroups());
+        await Task.WhenAll(LoadProfiles(), LoadModelProviders(), LoadToolGroups(), LoadAvailableSkills());
         _loading = false;
     }
 
@@ -573,6 +704,64 @@ else
         finally
         {
             _toolGroupsLoading = false;
+        }
+    }
+
+    private async Task LoadAvailableSkills()
+    {
+        try
+        {
+            var http = HttpClientFactory.CreateClient("gateway");
+            var result = await http.GetFromJsonAsync<List<AvailableSkillDto>>("/api/skills");
+            // Only show system and installed layer skills — agent-layer skills are already owned by agents
+            _availableSkills = (result ?? [])
+                .Where(s => string.Equals(s.Layer, "system", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(s.Layer, "installed", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(s => s.Layer)
+                .ThenBy(s => s.Name)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to load available skills");
+            _availableSkills = [];
+        }
+    }
+
+    private async Task LoadAssignedSkillsForForm(string agentName)
+    {
+        _skillsLoading = true;
+        try
+        {
+            var http = HttpClientFactory.CreateClient("gateway");
+            var result = await http.GetFromJsonAsync<AgentSkillsResponseDto>(
+                $"/api/agent-profiles/{Uri.EscapeDataString(agentName)}/skills");
+            _form.SelectedSkills = result?.AssignedSkills is { Count: > 0 }
+                ? new HashSet<string>(result.AssignedSkills, StringComparer.Ordinal)
+                : new HashSet<string>(StringComparer.Ordinal);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to load assigned skills for agent {Name}", agentName);
+            _form.SelectedSkills = new(StringComparer.Ordinal);
+        }
+        finally
+        {
+            _skillsLoading = false;
+        }
+    }
+
+    private async Task SyncAgentSkills(string agentName)
+    {
+        try
+        {
+            var http = HttpClientFactory.CreateClient("gateway");
+            var request = new { skillNames = _form.SelectedSkills.ToArray() };
+            await http.PutAsJsonAsync($"/api/agent-profiles/{Uri.EscapeDataString(agentName)}/skills", request);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to sync skills for agent {Name}", agentName);
         }
     }
 
@@ -611,6 +800,7 @@ else
         _isEditing = false;
         _showForm = true;
         _showImport = false;
+        _showExport = false;
         _saveSuccess = null;
         _errorMessage = string.Empty;
     }
@@ -641,6 +831,7 @@ else
         _isEditing = false;
         _showForm = true;
         _showImport = false;
+        _showExport = false;
         _saveSuccess = null;
         _errorMessage = string.Empty;
     }
@@ -661,12 +852,16 @@ else
             IsDefault       = profile.IsDefault,
             IsEnabled       = profile.IsEnabled,
             RequireToolApproval = profile.RequireToolApproval,
+            RetrievalLevel  = string.IsNullOrWhiteSpace(profile.RetrievalLevel) ? "Off" : profile.RetrievalLevel,
             Kind            = profile.Kind
         };
         _isEditing = true;
         _showForm = true;
         _saveSuccess = null;
         _errorMessage = string.Empty;
+        _showExport = false;
+        // Load assigned skills asynchronously without blocking render
+        _ = LoadAssignedSkillsForForm(profile.Name).ContinueWith(_ => InvokeAsync(StateHasChanged));
     }
 
     // ── Tool picker helpers ─────────────────────────────────
@@ -706,6 +901,7 @@ else
     {
         _showImport = true;
         _showForm = false;
+        _showExport = false;
         _importMarkdown = string.Empty;
         _saveSuccess = null;
         _errorMessage = string.Empty;
@@ -714,6 +910,83 @@ else
     private void CancelImport()
     {
         _showImport = false;
+    }
+
+    private void ShowExportForm()
+    {
+        if (_selected.Count == 0)
+        {
+            _exportSucceeded = false;
+            _exportMessage = "Select one or more profiles before exporting.";
+            return;
+        }
+
+        _showExport = true;
+        _showForm = false;
+        _showImport = false;
+        _exportSucceeded = false;
+        _exportMessage = string.Empty;
+    }
+
+    private void CancelExport()
+    {
+        _showExport = false;
+        _exportSucceeded = false;
+        _exportMessage = string.Empty;
+    }
+
+    private async Task ExportSelectedAgents()
+    {
+        if (_selected.Count == 0)
+        {
+            _exportSucceeded = false;
+            _exportMessage = "Select one or more profiles before exporting.";
+            return;
+        }
+
+        _exporting = true;
+        _exportSucceeded = false;
+        _exportMessage = string.Empty;
+        StateHasChanged();
+
+        try
+        {
+            var http = HttpClientFactory.CreateClient("gateway");
+            var request = new
+            {
+                profileNames = _selected.OrderBy(x => x, StringComparer.Ordinal).ToArray(),
+                namePrefix = _exportNamePrefix,
+                location = _exportLocation,
+                containerImage = _exportContainerImage,
+                containerPort = _exportContainerPort
+            };
+
+            using var response = await http.PostAsJsonAsync("/api/agent-profiles/export/hosted-agent", request);
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync();
+                _exportMessage = $"Export failed — Gateway returned {(int)response.StatusCode}: {body}";
+                return;
+            }
+
+            var bytes = await response.Content.ReadAsByteArrayAsync();
+            var fileName = $"hosted-agent-export-{DateTime.UtcNow:yyyyMMdd-HHmmss}.zip";
+            await JS.InvokeVoidAsync("consoleExport.downloadBinary", fileName, Convert.ToBase64String(bytes), "application/zip");
+
+            _exportSucceeded = true;
+            _exportMessage = $"Export generated: {fileName}";
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Hosted agent export failed");
+            _exportSucceeded = false;
+            _exportMessage = $"Could not reach the Gateway: {ex.Message}";
+        }
+        finally
+        {
+            _exporting = false;
+            StateHasChanged();
+        }
     }
 
     private async Task ImportProfile()
@@ -796,12 +1069,15 @@ else
                 IsDefault:    _form.IsDefault,
                 RequireToolApproval: _form.RequireToolApproval,
                 IsEnabled:    _form.IsEnabled,
+                RetrievalLevel: _form.RetrievalLevel,
                 Kind:         _form.Kind
             );
 
             var response = await http.PutAsJsonAsync($"/api/agent-profiles/{_form.Name}", request);
             if (response.IsSuccessStatusCode)
             {
+                // Sync skill assignments (assign new, unassign removed)
+                await SyncAgentSkills(_form.Name);
                 _saveSuccess = true;
                 _showForm = false;
                 await LoadProfiles();
@@ -883,6 +1159,8 @@ else
     {
         _selected.Clear();
         _bulkSkipMessage = null;
+        _showExport = false;
+        _exportMessage = string.Empty;
     }
 
     private async Task DeleteSelected()
@@ -1010,12 +1288,14 @@ else
         public string Provider        { get; set; } = "ollama";
         public string Instructions    { get; set; } = string.Empty;
         public HashSet<string> SelectedTools { get; set; } = new(StringComparer.Ordinal);
+        public HashSet<string> SelectedSkills { get; set; } = new(StringComparer.Ordinal);
         public double? Temperature    { get; set; }
         public int? MaxTokens         { get; set; }
         public bool IsDefault         { get; set; }
         public bool IsEnabled         { get; set; } = true;
         // Wave 4 PR-1: safe-by-default — new profiles require approval for sensitive tools.
         public bool RequireToolApproval { get; set; } = true;
+        public string RetrievalLevel  { get; set; } = "Off";
         public string Kind            { get; set; } = "Standard";
     }
 
@@ -1031,6 +1311,7 @@ else
         bool IsDefault,
         bool RequireToolApproval,
         bool IsEnabled,
+        string RetrievalLevel,
         DateTime? LastTestedAt,
         bool? LastTestSucceeded,
         string? LastTestError,
@@ -1044,9 +1325,21 @@ else
         double? Temperature,
         int? MaxTokens,
         bool IsDefault,
+        string RetrievalLevel = "Off",
         bool RequireToolApproval = true,
         bool? IsEnabled = true,
         string? Kind = "Standard");
+
+    /// <summary>
+    /// Transient test-only overrides sent to POST /api/agent-profiles/{name}/test when the
+    /// user clicks Test Agent while editing (Issue #236). Matches the Gateway's
+    /// AgentProfileTestOverrides record. Never saved — used for the test call only.
+    /// </summary>
+    private sealed record AgentProfileTestOverridesRequest(
+        string? Provider,
+        string? Model,
+        string? Instructions,
+        string RetrievalLevel);
 
     private sealed record ModelProviderDto(
         string Name, string ProviderType, string? DisplayName, string? Endpoint,
@@ -1059,7 +1352,11 @@ else
     private sealed record McpToolEntryDto(string Name, string Description);
 
     // ── Test ────────────────────────────────────────────────
-    private async Task TestAgent(string name)
+    // Issue #236: when testing from the edit form, forward the current (unsaved) form values
+    // as transient overrides so Test Agent exercises the provider actually selected in the
+    // combo box, not the stale persisted profile. List-row Test buttons keep the no-body
+    // request so their behavior (test against saved state) is unchanged.
+    private async Task TestAgent(string name, bool useFormOverrides = false)
     {
         _testing = true;
         _testingName = name;
@@ -1069,7 +1366,20 @@ else
         try
         {
             var http = HttpClientFactory.CreateClient("gateway");
-            var response = await http.PostAsync($"/api/agent-profiles/{name}/test", null);
+            HttpResponseMessage response;
+            if (useFormOverrides)
+            {
+                var overrides = new AgentProfileTestOverridesRequest(
+                    Provider: NullIfEmpty(_form.Provider),
+                    Model: null,
+                    Instructions: _form.Instructions,
+                    RetrievalLevel: _form.RetrievalLevel);
+                response = await http.PostAsJsonAsync($"/api/agent-profiles/{name}/test", overrides);
+            }
+            else
+            {
+                response = await http.PostAsync($"/api/agent-profiles/{name}/test", null);
+            }
             var body = await response.Content.ReadAsStringAsync();
 
             try
@@ -1132,6 +1442,20 @@ else
         public DateTime? LastTestedAt { get; init; }
         public bool? LastTestSucceeded { get; init; }
         public string? LastTestError { get; init; }
+    }
+
+    // ── Skills DTOs ───────────────────────────────────────────
+    private sealed record AvailableSkillDto(string Name, string Description, string Layer, string SnapshotId);
+    private sealed record AgentSkillsResponseDto
+    {
+        public string AgentName { get; init; } = string.Empty;
+        public List<string> AssignedSkills { get; init; } = [];
+    }
+
+    private void ToggleSkill(string skillName, bool selected)
+    {
+        if (selected) _form.SelectedSkills.Add(skillName);
+        else _form.SelectedSkills.Remove(skillName);
     }
 
     private static string FormatRelativeTime(DateTime utcTime)

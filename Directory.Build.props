@@ -1,5 +1,15 @@
 <Project>
+  <!--
+    Shared project metadata for all projects in the solution.
+  -->
   <PropertyGroup>
-    <RuntimeIdentifiers Condition="'$(RuntimeIdentifiers)' == ''">win-x64;linux-x64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <Authors>Bruno Capuano and OpenClawNet Contributors</Authors>
+    <Company>OpenClawNet</Company>
+    <Product>OpenClawNet</Product>
+    <Copyright>Copyright © 2025 OpenClawNet Contributors</Copyright>
+    <PackageProjectUrl>https://github.com/elbruno/openclawnet</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/elbruno/openclawnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 </Project>

@@ -49,7 +49,10 @@ public static class SkillEndpoints
 
         group.MapGet("/snapshot", GetSnapshot).WithName("GetSkillsSnapshot");
         group.MapGet("/", ListSkills).WithName("ListSkills");
+        group.MapGet("/agents/{agentName}", GetAgentSkills).WithName("GetAgentSkills");
         group.MapGet("/changes-since/{snapshotId}", GetChangesSince).WithName("GetSkillsChangesSince");
+        group.MapGet("/storage-paths", GetStoragePaths).WithName("GetSkillsStoragePaths");
+        group.MapPost("/open-folder", OpenSkillsFolder).WithName("OpenSkillsFolder");
         group.MapGet("/{name}", GetSkill).WithName("GetSkill");
         group.MapPost("/", CreateSkill).WithName("CreateSkill");
         group.MapPost("/reload", ReloadSkills).WithName("ReloadSkills");
@@ -58,6 +61,60 @@ public static class SkillEndpoints
         group.MapPut("/{name}/enabled-for/{agentName}", PutEnabledFor).WithName("PutSkillEnabledFor");
         group.MapPatch("/enabled", PatchEnabled).WithName("PatchSkillEnabled");
         group.MapDelete("/{name}", DeleteSkill).WithName("DeleteSkill");
+        group.MapPost("/bulk-delete", BulkDeleteSkills).WithName("BulkDeleteSkills");
+    }
+
+    // ====================================================================
+    // GET /api/skills/storage-paths
+    // ====================================================================
+    private static IResult GetStoragePaths()
+    {
+        var systemPath    = OpenClawNetPaths.ResolveSkillsSystemRoot();
+        var installedPath = OpenClawNetPaths.ResolveSkillsInstalledRoot();
+        return Results.Ok(new SkillsStoragePathsDtoOut(
+            SystemPath: systemPath,
+            InstalledPath: installedPath));
+    }
+
+    // ====================================================================
+    // POST /api/skills/open-folder
+    // ====================================================================
+    private static IResult OpenSkillsFolder(
+        [Microsoft.AspNetCore.Mvc.FromQuery] string? layer,
+        ILoggerFactory loggerFactory)
+    {
+        var logger = loggerFactory.CreateLogger(nameof(SkillEndpoints));
+        var path = string.Equals(layer, "system", StringComparison.OrdinalIgnoreCase)
+            ? OpenClawNetPaths.ResolveSkillsSystemRoot(logger)
+            : OpenClawNetPaths.ResolveSkillsInstalledRoot(logger);
+
+        if (!Directory.Exists(path))
+        {
+            try { Directory.CreateDirectory(path); }
+            catch (Exception ex)
+            {
+                return Results.Problem(
+                    detail: $"Cannot create directory: {ex.Message}",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+        }
+
+        try
+        {
+            if (OperatingSystem.IsWindows())
+                System.Diagnostics.Process.Start("explorer.exe", path);
+            else if (OperatingSystem.IsMacOS())
+                System.Diagnostics.Process.Start("open", path);
+            else
+                System.Diagnostics.Process.Start("xdg-open", path);
+
+            return Results.Ok(new { path, opened = true });
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not open folder '{Path}' in file explorer.", path);
+            return Results.Ok(new { path, opened = false, error = ex.Message });
+        }
     }
 
     // ====================================================================
@@ -84,6 +141,42 @@ public static class SkillEndpoints
             .Select(s => ToDto(s, enabledByAgent))
             .ToList();
         return Results.Ok(dtos);
+    }
+
+    // ====================================================================
+    // GET /api/skills/agents/{agentName}
+    // ====================================================================
+    private static async Task<IResult> GetAgentSkills(
+        string agentName,
+        ISkillsRegistry registry,
+        [FromQuery] bool enabledOnly = false,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(agentName))
+            return Problem(StatusCodes.Status400BadRequest, "invalid_agent_name", "agentName must not be empty.");
+
+        var snapshot = await registry.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var rows = new List<AgentSkillStateDtoOut>(snapshot.Skills.Count);
+
+        foreach (var skill in snapshot.Skills.OrderBy(s => s.Name, StringComparer.Ordinal))
+        {
+            var enabled = await registry.IsEnabledForAgentAsync(skill.Name, agentName, ct).ConfigureAwait(false);
+            if (enabledOnly && !enabled)
+                continue;
+
+            rows.Add(new AgentSkillStateDtoOut(
+                Name: skill.Name,
+                Layer: skill.Layer.ToString().ToLowerInvariant(),
+                Enabled: enabled));
+        }
+
+        return Results.Ok(new AgentSkillsInspectDtoOut(
+            AgentName: agentName,
+            SnapshotId: snapshot.SnapshotId,
+            BuiltUtc: snapshot.BuiltUtc,
+            TotalSkills: rows.Count,
+            EnabledSkills: rows.Count(r => r.Enabled),
+            Skills: rows));
     }
 
     // ====================================================================
@@ -364,6 +457,97 @@ public static class SkillEndpoints
     }
 
     // ====================================================================
+    // POST /api/skills/bulk-delete — delete multiple skills at once
+    // ====================================================================
+    private sealed record BulkDeleteRequest(string[] Names);
+    private sealed record BulkDeleteResult(
+        int SuccessCount,
+        int FailureCount,
+        Dictionary<string, string> Failures);
+
+    private static async Task<IResult> BulkDeleteSkills(
+        [FromBody] BulkDeleteRequest request,
+        OpenClawNetSkillsRegistry registry,
+        ISafePathResolver safePathResolver,
+        ILogger<OpenClawNetSkillsRegistry> logger,
+        CancellationToken ct)
+    {
+        if (request is null || request.Names is null || request.Names.Length == 0)
+            return Problem(StatusCodes.Status400BadRequest, "missing_names", "Request must include an array of skill names.");
+
+        var snap = await registry.GetSnapshotAsync(ct).ConfigureAwait(false);
+        var installedRoot = OpenClawNetPaths.ResolveSkillsInstalledRoot(logger);
+        
+        var successCount = 0;
+        var failures = new Dictionary<string, string>();
+
+        foreach (var name in request.Names)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                failures[name ?? "(empty)"] = "Skill name is empty or whitespace.";
+                continue;
+            }
+
+            if (!IsValidSkillName(name))
+            {
+                failures[name] = "Skill name fails the agentskills.io name regex.";
+                continue;
+            }
+
+            var record = snap.Skills.FirstOrDefault(s => string.Equals(s.Name, name, StringComparison.Ordinal));
+            if (record is null)
+            {
+                failures[name] = "Skill not found in current snapshot.";
+                continue;
+            }
+
+            if (record.Layer != SkillLayer.Installed)
+            {
+                failures[name] = $"Skill is in layer '{record.Layer}' which is read-only (only 'installed' layer skills can be deleted).";
+                continue;
+            }
+
+            var skillFolder = safePathResolver.ResolveSafePath(installedRoot, name);
+            if (Directory.Exists(skillFolder))
+            {
+                try
+                {
+                    Directory.Delete(skillFolder, recursive: true);
+                    successCount++;
+                }
+                catch (IOException ex)
+                {
+                    failures[name] = $"Delete failed: {ex.Message}";
+                }
+                catch (UnauthorizedAccessException ex)
+                {
+                    failures[name] = $"Access denied: {ex.Message}";
+                }
+            }
+            else
+            {
+                failures[name] = "Skill folder does not exist on disk.";
+            }
+        }
+
+        // Rebuild once after all deletions
+        if (successCount > 0)
+        {
+            registry.Rebuild();
+        }
+
+        var result = new BulkDeleteResult(successCount, failures.Count, failures);
+
+        // Return 200 with partial success details if some succeeded
+        // Return 400 if all failed
+        if (successCount == 0 && failures.Count > 0)
+            return Results.BadRequest(result);
+
+        return Results.Ok(result);
+    }
+
+    // ====================================================================
     // GET /api/skills/changes-since/{snapshotId}
     // ====================================================================
     private static IResult GetChangesSince(string snapshotId, OpenClawNetSkillsRegistry registry)
@@ -519,6 +703,19 @@ internal sealed record SkillsChangesDtoOut(
     string[] Modified,
     string[] Removed);
 
+internal sealed record AgentSkillStateDtoOut(
+    string Name,
+    string Layer,
+    bool Enabled);
+
+internal sealed record AgentSkillsInspectDtoOut(
+    string AgentName,
+    string SnapshotId,
+    DateTimeOffset BuiltUtc,
+    int TotalSkills,
+    int EnabledSkills,
+    IReadOnlyList<AgentSkillStateDtoOut> Skills);
+
 internal sealed record CreateSkillRequestIn(
     string Name,
     string Description,
@@ -529,3 +726,7 @@ internal sealed record CreateSkillRequestIn(
     string Body);
 
 internal sealed record SkillsProblemOut(string Reason, string? Detail);
+
+internal sealed record SkillsStoragePathsDtoOut(
+    string SystemPath,
+    string InstalledPath);

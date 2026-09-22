@@ -1,10 +1,32 @@
 var builder = DistributedApplication.CreateBuilder(args);
 
+// Configurable deploy target: "docker" (default) or "azure"
+// For Azure: use `aspire publish --publisher azure-container-apps` or `azd up` at deploy time.
+// Set via appsettings.json or OPENCLAW_DEPLOY_TARGET env var.
+var deployTarget = builder.Configuration["OpenClawNet:Deploy:Target"]
+    ?? Environment.GetEnvironmentVariable("OPENCLAW_DEPLOY_TARGET")
+    ?? "docker";
+
+if (deployTarget.Equals("docker", StringComparison.OrdinalIgnoreCase))
+{
+    builder.AddDockerComposeEnvironment("env");
+}
+
 var dbPath = builder.Configuration["OpenClawNet:ConnectionStrings:DbPath"]
     ?? Path.Combine(builder.AppHostDirectory, ".data");
 
-var sqlite = builder.AddSqlite("openclawnet-db", databasePath: dbPath, databaseFileName: "openclawnet.db")
-    .WithSqliteWeb();
+var sqlite = builder.AddSqlite("openclawnet-db", databasePath: dbPath, databaseFileName: "openclawnet.db");
+
+// Sqlite Web runs as a containerized companion. Keep it enabled by default for local
+// developer convenience, but allow test harnesses to disable it in Docker-less environments.
+var enableSqliteWeb = !string.Equals(
+    Environment.GetEnvironmentVariable("OPENCLAW_ENABLE_SQLITE_WEB"),
+    "false",
+    StringComparison.OrdinalIgnoreCase);
+if (enableSqliteWeb)
+{
+    sqlite.WithSqliteWeb();
+}
 
 // Ollama is expected to be running locally (localhost:11434).
 // The gateway falls back to local Ollama via RuntimeModelSettings.

@@ -131,8 +131,13 @@ internal sealed class ModelClientChatClientAdapter : IChatClient
             _ => ChatMessageRole.Assistant
         };
 
-        var text = message.Text ?? string.Empty;
-        var toolCallId = message.Contents.OfType<FunctionResultContent>().FirstOrDefault()?.CallId;
+        // Tool role messages carry their content in FunctionResultContent.Result, not TextContent.
+        // Reading only message.Text would lose the tool output entirely (e.g. 17 KB markdown).
+        var frc = message.Contents.OfType<FunctionResultContent>().FirstOrDefault();
+        var toolCallId = frc?.CallId;
+        var text = frc is not null
+            ? (frc.Result?.ToString() ?? string.Empty)
+            : (message.Text ?? string.Empty);
         var toolCalls = message.Contents
             .OfType<FunctionCallContent>()
             .Select(c => new ModelToolCall

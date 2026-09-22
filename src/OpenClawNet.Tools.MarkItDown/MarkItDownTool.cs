@@ -16,13 +16,13 @@ namespace OpenClawNet.Tools.MarkItDown;
 /// </summary>
 public sealed class MarkItDownTool : ITool
 {
-    private readonly MarkdownService _markdown;
+    private readonly IMarkdownService _markdown;
     private readonly IHttpClientFactory _httpFactory;
     private readonly IStorageDirectoryProvider _storageProvider;
     private readonly ILogger<MarkItDownTool> _logger;
 
     public MarkItDownTool(
-        MarkdownService markdown,
+        IMarkdownService markdown,
         IHttpClientFactory httpFactory,
         IStorageDirectoryProvider storageProvider,
         ILogger<MarkItDownTool> logger)
@@ -36,7 +36,7 @@ public sealed class MarkItDownTool : ITool
     public string Name => "markdown_convert";
 
     public string Description =>
-        "Convert a web URL (http/https) into clean Markdown by fetching the page and stripping HTML navigation, scripts, and styles. ONLY use this tool when the user explicitly asks to convert a URL to Markdown, summarize a web page, or download web content as Markdown. Do NOT use this tool for file operations, shell commands, or non-web tasks.";
+        "Convert a web URL (http/https) into clean Markdown by fetching the page and stripping HTML navigation, scripts, and styles. Use this tool when users ask to summarize website content or extract the latest website/blog content — convert first, then summarize from the markdown. Use web_fetch only when raw page content is explicitly requested instead of markdown conversion. Do NOT use this tool for file operations, shell commands, or non-web tasks.";
 
     public ToolMetadata Metadata => new()
     {
@@ -55,81 +55,247 @@ public sealed class MarkItDownTool : ITool
         """),
         RequiresApproval = true, // Network egress to arbitrary URLs — same risk class as web_fetch
         Category = "web",
-        Tags = ["markdown", "web", "convert", "url", "summarize"]
+        Tags = ["markdown", "web", "convert", "url"]
     };
 
     public async Task<ToolResult> ExecuteAsync(ToolInput input, CancellationToken cancellationToken = default)
     {
         var sw = Stopwatch.StartNew();
         var url = input.GetStringArgument("url");
+        
+        _logger.LogInformation("=== MarkItDown.ExecuteAsync ENTRY ===");
+        _logger.LogInformation("URL={Url}, SaveToFile={SaveToFile}", url, input.GetArgument<bool?>("save_to_file") ?? false);
+        
         try
         {
             if (string.IsNullOrWhiteSpace(url))
+            {
+                _logger.LogWarning("URL parameter is null/empty");
                 return ToolResult.Fail(Name, "'url' is required", sw.Elapsed);
+            }
 
+            _logger.LogInformation("URL validation: attempting to parse {Url}", url);
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
                 (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                _logger.LogWarning("URL validation failed: {Url} is not a valid http/https URL", url);
                 return ToolResult.Fail(Name, $"Invalid URL: {url}. Only http and https are supported.", sw.Elapsed);
+            }
+
+            _logger.LogInformation("URI parsed successfully: Scheme={Scheme}, Host={Host}, Path={Path}", uri.Scheme, uri.Host, uri.AbsolutePath);
 
             if (IsLocalUri(uri))
+            {
+                _logger.LogWarning("Local URI check failed: {Url} is a local/private address", url);
                 return ToolResult.Fail(Name, $"markdown_convert refused {url}: fetching from local/private addresses is not allowed", sw.Elapsed);
+            }
 
-            _logger.LogInformation("Converting URL to Markdown: {Url}", url);
-
-            // Fetch with our managed HttpClient so timeouts/proxies/HSTS apply uniformly,
-            // then hand the stream to MarkdownService which auto-detects HTML.
-            var http = _httpFactory.CreateClient(nameof(MarkItDownTool));
-            using var response = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-                return ToolResult.Fail(Name, $"markdown_convert failed for {url}: HTTP {(int)response.StatusCode} {response.StatusCode}", sw.Elapsed);
-
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var ext = ResolveExtension(response.Content.Headers.ContentType?.MediaType, uri);
+            _logger.LogInformation("Security checks passed, starting conversion for {Url}", url);
 
             string markdown;
             string sourceFormat;
+            string resolvedExt = "n/a";
+            
+            static bool ShouldFallbackToHttp(ConversionResult r)
+            {
+                var md = r.Markdown ?? string.Empty;
+                return !r.Success ||
+                       string.IsNullOrWhiteSpace(md) ||
+                       md.Contains("Blocked URL", StringComparison.OrdinalIgnoreCase);
+            }
+            
             try
             {
-                var result = await _markdown.ConvertAsync(stream, ext);
-                sw.Stop();
+                // Preferred path: let MarkItDotNet fetch + convert directly from URL.
+                _logger.LogInformation("Attempting ConvertUrlAsync (preferred path) for {Url}", url);
+                var result = await _markdown.ConvertUrlAsync(url);
+                
+                _logger.LogInformation("ConvertUrlAsync completed for {Url}: Success={Success}, ContentLength={ContentLength}, ErrorMessage={ErrorMessage}",
+                    url, 
+                    result.Success,
+                    result.Markdown?.Length ?? 0,
+                    result.ErrorMessage ?? "(none)");
 
-                if (!result.Success)
-                    return ToolResult.Fail(Name,
-                        $"markdown_convert failed for {url}: MarkItDotNet returned Success=false ({result.ErrorMessage ?? "no error message"})",
-                        sw.Elapsed);
+                _logger.LogInformation(
+                    "ConvertUrlAsync completed: Success={Success}, MarkdownLength={MarkdownLength}, SourceFormat={SourceFormat}, ErrorMessage={ErrorMessage}",
+                    result.Success,
+                    result.Markdown?.Length ?? 0,
+                    result.SourceFormat?.ToString() ?? "null",
+                    result.ErrorMessage ?? "none");
 
-                markdown = result.Markdown ?? string.Empty;
-                sourceFormat = result.SourceFormat?.ToString() ?? "unknown";
+                if (!ShouldFallbackToHttp(result))
+                {
+                    _logger.LogInformation("ConvertUrlAsync produced valid markdown ({Length} chars) for {Url}", result.Markdown?.Length ?? 0, url);
+                    markdown = result.Markdown!;
+                    sourceFormat = result.SourceFormat?.ToString() ?? "unknown";
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "ConvertUrlAsync returned unusable content for {Url}. Falling back to HttpClient stream conversion. Success={Success}, MarkdownLength={MarkdownLength}, Error={Error}",
+                        url,
+                        result.Success,
+                        result.Markdown?.Length ?? 0,
+                        result.ErrorMessage ?? "(none)");
+
+                    // Fallback path: use HttpClient to fetch as stream
+                    _logger.LogInformation("Fallback: Creating HttpClient for {Url}", url);
+                    var http = _httpFactory.CreateClient(nameof(MarkItDownTool));
+                    
+                    _logger.LogInformation("Fallback: Sending GET request to {Url}", url);
+                    using var response = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    
+                    _logger.LogInformation("Fallback: HTTP response received for {Url}: StatusCode={StatusCode}, ContentType={ContentType}, ContentLength={ContentLength}",
+                        url,
+                        (int)response.StatusCode,
+                        response.Content.Headers.ContentType?.MediaType ?? "(none)",
+                        response.Content.Headers.ContentLength ?? 0);
+                    
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogError("Fallback: HTTP request failed for {Url}: {StatusCode} {ReasonPhrase}", url, (int)response.StatusCode, response.ReasonPhrase);
+                        return ToolResult.Fail(Name, $"markdown_convert failed for {url}: HTTP {(int)response.StatusCode} {response.StatusCode}", sw.Elapsed);
+                    }
+
+                    await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    var ext = ResolveExtension(response.Content.Headers.ContentType?.MediaType, uri);
+                    resolvedExt = ext;
+                    
+                    _logger.LogInformation("Fallback: Stream read, detected extension={Ext}, calling ConvertAsync", ext);
+                    var fallbackResult = await _markdown.ConvertAsync(stream, ext);
+                    
+                    _logger.LogInformation("Fallback: ConvertAsync completed for {Url}: Success={Success}, ContentLength={ContentLength}, ErrorMessage={ErrorMessage}",
+                        url,
+                        fallbackResult.Success,
+                        fallbackResult.Markdown?.Length ?? 0,
+                        fallbackResult.ErrorMessage ?? "(none)");
+
+                    _logger.LogInformation(
+                        "HTTP fallback ConvertAsync completed: Success={Success}, MarkdownLength={MarkdownLength}, SourceFormat={SourceFormat}, Ext={Ext}",
+                        fallbackResult.Success,
+                        fallbackResult.Markdown?.Length ?? 0,
+                        fallbackResult.SourceFormat?.ToString() ?? "null",
+                        ext);
+
+                    if (!fallbackResult.Success)
+                    {
+                        _logger.LogError("Fallback: MarkItDotNet conversion failed for {Url}: Success=false, Error={Error}",
+                            url,
+                            fallbackResult.ErrorMessage ?? "(no error message)");
+                        return ToolResult.Fail(Name,
+                            $"markdown_convert failed for {url}: MarkItDotNet returned Success=false ({fallbackResult.ErrorMessage ?? "no error message"})",
+                            sw.Elapsed);
+                    }
+
+                    markdown = fallbackResult.Markdown ?? string.Empty;
+                    sourceFormat = fallbackResult.SourceFormat?.ToString() ?? "unknown";
+                    
+                    _logger.LogInformation("Fallback: Conversion succeeded with {Length} chars", markdown.Length);
+                }
             }
             catch (Exception ex)
             {
-                // ElBruno.MarkItDotNet has historically thrown on a few edge cases
-                // (encoding mismatches, malformed HTML, missing native deps).
-                // Surface the FULL exception type + message so the failure card on
-                // the channel detail page has something actionable instead of an
-                // opaque "tool failed" string.
-                _logger.LogError(ex, "MarkItDotNet.ConvertAsync threw for {Url} (ext={Ext})", url, ext);
-                return ToolResult.Fail(
-                    Name,
-                    $"markdown_convert failed for {url}: MarkItDotNet threw {ex.GetType().Name}: {ex.Message}",
+                _logger.LogError(ex, "ConvertUrlAsync threw exception for {Url}: {ExceptionType} {Message}. Attempting second fallback with HttpClient stream conversion.", 
+                    url, ex.GetType().Name, ex.Message);
+                
+                try
+                {
+                    _logger.LogInformation("Second fallback: Creating HttpClient for {Url}", url);
+                    var http = _httpFactory.CreateClient(nameof(MarkItDownTool));
+                    
+                    _logger.LogInformation("Second fallback: Sending GET request to {Url}", url);
+                    using var response = await http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                    
+                    _logger.LogInformation("Second fallback: HTTP response received for {Url}: StatusCode={StatusCode}, ContentType={ContentType}, ContentLength={ContentLength}",
+                        url,
+                        (int)response.StatusCode,
+                        response.Content.Headers.ContentType?.MediaType ?? "(none)",
+                        response.Content.Headers.ContentLength ?? 0);
+                    
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        _logger.LogError("Second fallback: HTTP request failed for {Url}: {StatusCode} {ReasonPhrase}", url, (int)response.StatusCode, response.ReasonPhrase);
+                        return ToolResult.Fail(Name, $"markdown_convert failed for {url}: HTTP {(int)response.StatusCode} {response.StatusCode}", sw.Elapsed);
+                    }
+
+                    await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                    var ext = ResolveExtension(response.Content.Headers.ContentType?.MediaType, uri);
+                    resolvedExt = ext;
+                    
+                    _logger.LogInformation("Second fallback: Stream read, detected extension={Ext}, calling ConvertAsync", ext);
+                    var fallbackResult = await _markdown.ConvertAsync(stream, ext);
+                    
+                    _logger.LogInformation("Second fallback: ConvertAsync completed for {Url}: Success={Success}, ContentLength={ContentLength}, ErrorMessage={ErrorMessage}",
+                        url,
+                        fallbackResult.Success,
+                        fallbackResult.Markdown?.Length ?? 0,
+                        fallbackResult.ErrorMessage ?? "(none)");
+                    
+                    if (!fallbackResult.Success)
+                    {
+                        _logger.LogError("Second fallback: MarkItDotNet conversion failed for {Url}: Success=false, Error={Error}",
+                            url,
+                            fallbackResult.ErrorMessage ?? "(no error message)");
+                        return ToolResult.Fail(Name,
+                            $"markdown_convert failed for {url}: MarkItDotNet returned Success=false ({fallbackResult.ErrorMessage ?? "no error message"})",
+                            sw.Elapsed);
+                    }
+
+                    markdown = fallbackResult.Markdown ?? string.Empty;
+                    sourceFormat = fallbackResult.SourceFormat?.ToString() ?? "unknown";
+                    
+                    _logger.LogInformation("Second fallback: Conversion succeeded with {Length} chars", markdown.Length);
+                }
+                catch (Exception fallbackEx)
+                {
+                    _logger.LogError(fallbackEx, "Second fallback MarkItDotNet conversion failed for {Url}: {ExceptionType} {Message} (Stack: {StackTrace})", 
+                        url, 
+                        fallbackEx.GetType().Name, 
+                        fallbackEx.Message,
+                        fallbackEx.StackTrace);
+                    return ToolResult.Fail(
+                        Name,
+                        $"markdown_convert failed for {url}: MarkItDotNet threw {fallbackEx.GetType().Name}: {fallbackEx.Message}",
+                        sw.Elapsed);
+                }
+            }
+
+            _logger.LogInformation("Markdown content check for {Url}: Length={Length}", url, markdown?.Length ?? 0);
+            if (string.IsNullOrWhiteSpace(markdown))
+            {
+                _logger.LogError("Markdown output is empty/null for {Url} (sourceFormat={SourceFormat}, ext={Extension})",
+                    url,
+                    sourceFormat,
+                    resolvedExt);
+                return ToolResult.Fail(Name,
+                    $"markdown_convert produced empty output for {url} (sourceFormat={sourceFormat}, ext={resolvedExt}). " +
+                    "The page may be empty, blocked by a paywall/JS gate, or in an unsupported format.",
                     sw.Elapsed);
             }
 
-            if (string.IsNullOrWhiteSpace(markdown))
-                return ToolResult.Fail(Name,
-                    $"markdown_convert produced empty output for {url} (sourceFormat={sourceFormat}, ext={ext}). " +
-                    "The page may be empty, blocked by a paywall/JS gate, or in an unsupported format.",
-                    sw.Elapsed);
-
             var output = $"# Source: {url}\n# Format: {sourceFormat}\n\n{markdown}";
+            _logger.LogInformation("Generated output for {Url}: {OutputLength} chars", url, output.Length);
+
+            // Log the full output for debugging
+            var preview = output.Length > 300 ? output.Substring(0, 300) + "..." : output;
+            _logger.LogInformation(
+                "markdown_convert returning {OutputLength} chars: Success (format={SourceFormat}). Preview:\n{Preview}",
+                output.Length, sourceFormat, preview);
+
+            // Log that we're about to return Ok
+            _logger.LogInformation("Returning ToolResult.Ok with {OutputLength} chars of content", output.Length);
 
             // Check if we should save to file
             var saveToFile = input.GetArgument<bool?>("save_to_file") ?? false;
             if (saveToFile)
             {
+                _logger.LogInformation("save_to_file requested for {Url}", url);
                 var agentName = input.GetStringArgument("agent_name");
                 if (string.IsNullOrWhiteSpace(agentName))
+                {
+                    _logger.LogWarning("save_to_file=true but agent_name not provided for {Url}", url);
                     return ToolResult.Fail(Name, "agent_name is required when save_to_file is true", sw.Elapsed);
+                }
 
                 try
                 {
@@ -137,27 +303,35 @@ public sealed class MarkItDownTool : ITool
                     var filename = GenerateFilenameFromUrl(uri) + ".md";
                     var fullPath = Path.Combine(storagePath, filename);
 
+                    _logger.LogInformation("Writing markdown to file: {Path}", fullPath);
                     await File.WriteAllTextAsync(fullPath, output, cancellationToken);
-                    _logger.LogInformation("Saved markdown to {Path}", fullPath);
+                    _logger.LogInformation("Successfully saved markdown to {Path}", fullPath);
 
                     return ToolResult.Ok(Name, $"Markdown saved to: {fullPath}\n\nPreview:\n{output.Substring(0, Math.Min(500, output.Length))}...", sw.Elapsed);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Failed to save markdown to file for {Url}", url);
+                    _logger.LogError(ex, "Failed to save markdown to file for {Url}: {ExceptionType} {Message}", url, ex.GetType().Name, ex.Message);
                     return ToolResult.Fail(Name, $"Failed to save markdown: {ex.Message}", sw.Elapsed);
                 }
             }
 
+            _logger.LogInformation("=== MarkItDown.ExecuteAsync EXIT (SUCCESS) === Elapsed={ElapsedMs}ms, OutputLength={OutputLength}", sw.ElapsedMilliseconds, output.Length);
             return ToolResult.Ok(Name, output, sw.Elapsed);
         }
-        catch (TaskCanceledException)
+        catch (TaskCanceledException ex)
         {
+            _logger.LogError(ex, "=== MarkItDown.ExecuteAsync TIMEOUT === URL={Url}, Elapsed={ElapsedMs}ms", url, sw.ElapsedMilliseconds);
             return ToolResult.Fail(Name, $"markdown_convert timed out fetching {url}", sw.Elapsed);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "MarkItDown tool error for {Url}", url);
+            _logger.LogError(ex, "=== MarkItDown.ExecuteAsync EXCEPTION === URL={Url}, ExceptionType={ExceptionType}, Message={Message}, StackTrace={StackTrace}, Elapsed={ElapsedMs}ms", 
+                url, 
+                ex.GetType().Name, 
+                ex.Message,
+                ex.StackTrace,
+                sw.ElapsedMilliseconds);
             return ToolResult.Fail(Name,
                 $"markdown_convert failed for {url}: {ex.GetType().Name}: {ex.Message}",
                 sw.Elapsed);

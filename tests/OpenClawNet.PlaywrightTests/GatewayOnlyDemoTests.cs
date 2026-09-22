@@ -8,13 +8,13 @@ namespace OpenClawNet.PlaywrightTests;
 /// Tests specifically for the gateway-only demo track — validates health detail,
 /// session isolation, and gateway behaviour without requiring the Blazor UI.
 /// </summary>
-[Collection("AppHost")]
+[Collection("AspireHost")]
 public class GatewayOnlyDemoTests : IAsyncLifetime
 {
-    private readonly AppHostFixture _fixture;
+    private readonly AspireHostFixture _fixture;
     private HttpClient _client = null!;
 
-    public GatewayOnlyDemoTests(AppHostFixture fixture)
+    public GatewayOnlyDemoTests(AspireHostFixture fixture)
     {
         _fixture = fixture;
     }
@@ -41,7 +41,7 @@ public class GatewayOnlyDemoTests : IAsyncLifetime
         return true;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Gateway_HealthEndpoint_ReturnsDetailedStatus()
     {
         var response = await _client.GetAsync("/health");
@@ -54,7 +54,7 @@ public class GatewayOnlyDemoTests : IAsyncLifetime
         Assert.True(DateTime.TryParse(ts.GetString(), out _), "Timestamp should be a parseable date-time");
     }
 
-    [Fact]
+    [SkippableFact]
     [Trait("Category", "RequiresModel")]
     public async Task Gateway_ParallelSessions_AreIsolated()
     {

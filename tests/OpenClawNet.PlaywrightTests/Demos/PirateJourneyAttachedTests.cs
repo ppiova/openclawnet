@@ -76,11 +76,16 @@ namespace OpenClawNet.PlaywrightTests.Demos;
 /// └──────────────────────────────────────────────────────────────────────────────┘
 ///
 /// <seealso cref="SkillsPirateJourneyE2ETests"/> — In-process twin for CI/regression
-/// <seealso cref="AttachedAspireTestBase"/> — Base class with full documentation
+/// <seealso cref="AspireHostAttachedDemoTestBase"/> — Demo base backed by <see cref="AspireHostFixture"/>
 /// </summary>
 [Trait("Category", "DemoLive")]
-public class PirateJourneyAttachedTests : AttachedAspireTestBase
+[Collection("AspireHost")]
+public sealed class PirateJourneyAttachedTests : AspireHostAttachedDemoTestBase
 {
+    public PirateJourneyAttachedTests(AspireHostFixture fixture) : base(fixture)
+    {
+    }
+
     // Use a timestamped skill name to avoid cross-run state pollution since the
     // SQLite DB is shared across runs when attaching to a persistent Aspire instance.
     private readonly string _skillName = $"pirate-mode-demo-{DateTime.UtcNow:yyyyMMddHHmmss}";
@@ -110,7 +115,7 @@ public class PirateJourneyAttachedTests : AttachedAspireTestBase
         @"\b(arr+|matey|ahoy|plunder|booty|landlubber|scallywag|seafarin'?|seafaring|treasure|cap'?n|aye)\b",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-    [Fact]
+    [SkippableFact]
     public async Task PirateSkill_AppliedToAgent_AgentRepliesInPirate()
     {
         // Note: No Skip.IfNot check here — this is demo-only. If Aspire/LLM isn't

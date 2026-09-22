@@ -64,6 +64,45 @@ else
             </div>
         </div>
 
+        @* ── Tool Execution Logging Card ───────────────────────── *@
+        <div class="card mb-3">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>Tool Execution Logging</span>
+                @if (_toolLoggingSaveSuccess.HasValue)
+                {
+                    <span class="badge @(_toolLoggingSaveSuccess.Value ? "bg-success" : "bg-danger")">
+                        @(_toolLoggingSaveSuccess.Value ? "✔ Saved" : "✘ Error")
+                    </span>
+                }
+            </div>
+            <div class="card-body">
+                @if (_toolLoggingError is not null)
+                {
+                    <div class="alert alert-warning py-2 small">@_toolLoggingError</div>
+                }
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input"
+                           type="checkbox"
+                           role="switch"
+                           id="toolExecutionLoggingEnabled"
+                           @bind="_toolLoggingSettings.Enabled" />
+                    <label class="form-check-label fw-semibold" for="toolExecutionLoggingEnabled">
+                        Enable extensive tool execution logging
+                    </label>
+                    <div class="form-text">
+                        When enabled, all tools emit detailed invocation logs (arguments/output previews, duration, and failures).
+                    </div>
+                </div>
+                <button class="btn btn-primary" @onclick="SaveToolLoggingSettings" disabled="@_toolLoggingSaving">
+                    @if (_toolLoggingSaving)
+                    {
+                        <span class="spinner-border spinner-border-sm me-1" role="status"></span>
+                    }
+                    Save Tool Logging Settings
+                </button>
+            </div>
+        </div>
+
         @* ── Storage Location Card ───────────────────────────── *@
         <div class="card mb-3">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -129,6 +168,12 @@ else
     private bool? _schedulerSaveSuccess;
     private string? _schedulerError;
 
+    // ── Tool logging settings ───────────────────────────────────
+    private ToolLoggingSettingsDto _toolLoggingSettings = new();
+    private bool _toolLoggingSaving;
+    private bool? _toolLoggingSaveSuccess;
+    private string? _toolLoggingError;
+
     // ── Storage Location ──────────────────────────────────────
     private StorageLocationDto? _storageLocation;
     private string _newStoragePath = string.Empty;
@@ -141,6 +186,7 @@ else
     {
         await Task.WhenAll(
             LoadSchedulerSettings(),
+            LoadToolLoggingSettings(),
             LoadStorageLocation()
         );
         _loading = false;
@@ -158,6 +204,66 @@ else
         {
             Logger.LogWarning(ex, "Failed to load scheduler settings");
             _schedulerError = "Scheduler service unavailable — showing defaults.";
+        }
+    }
+
+    private async Task LoadToolLoggingSettings()
+    {
+        try
+        {
+            var http = HttpClientFactory.CreateClient("gateway");
+            var result = await http.GetFromJsonAsync<ToolLoggingSettingsDto>("/api/settings/tool-logging");
+            if (result is not null) _toolLoggingSettings = result;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to load tool logging settings");
+            _toolLoggingError = "Gateway settings unavailable — showing defaults.";
+        }
+    }
+
+    private async Task SaveToolLoggingSettings()
+    {
+        _toolLoggingSaving = true;
+        _toolLoggingSaveSuccess = null;
+        _toolLoggingError = null;
+        StateHasChanged();
+        try
+        {
+            var http = HttpClientFactory.CreateClient("gateway");
+            var request = new ToolLoggingUpdateRequestDto { Enabled = _toolLoggingSettings.Enabled };
+            var response = await http.PutAsJsonAsync("/api/settings/tool-logging", request);
+            _toolLoggingSaveSuccess = response.IsSuccessStatusCode;
+
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<ToolLoggingSettingsDto>();
+                if (result is not null)
+                {
+                    _toolLoggingSettings = result;
+                }
+            }
+            else
+            {
+                _toolLoggingError = await response.Content.ReadAsStringAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to save tool logging settings");
+            _toolLoggingSaveSuccess = false;
+            _toolLoggingError = ex.Message;
+        }
+        finally
+        {
+            _toolLoggingSaving = false;
+            StateHasChanged();
+            if (_toolLoggingSaveSuccess == true)
+            {
+                await Task.Delay(4000);
+                _toolLoggingSaveSuccess = null;
+                StateHasChanged();
+            }
         }
     }
 
@@ -195,7 +301,7 @@ else
     {
         try
         {
-            var http = HttpClientFactory.CreateClient("scheduler");
+            var http = HttpClientFactory.CreateClient("gateway");
             var result = await http.GetFromJsonAsync<StorageLocationDto>("/api/storage/location");
             if (result is not null)
             {
@@ -206,7 +312,7 @@ else
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to load storage location");
-            _storageError = "Storage service unavailable — showing defaults.";
+            _storageError = "Gateway storage settings unavailable — showing defaults.";
         }
     }
 
@@ -218,8 +324,8 @@ else
         StateHasChanged();
         try
         {
-            var http = HttpClientFactory.CreateClient("scheduler");
-            var request = new { rootPath = _newStoragePath };
+            var http = HttpClientFactory.CreateClient("gateway");
+            var request = new StorageUpdateRequestDto { RootPath = _newStoragePath };
             var response = await http.PutAsJsonAsync("/api/storage/location", request);
             
             if (response.IsSuccessStatusCode)
@@ -234,8 +340,7 @@ else
             else
             {
                 _storageSaveSuccess = false;
-                var errorResult = await response.Content.ReadFromJsonAsync<StorageUpdateDto>();
-                _storageError = errorResult?.Message ?? $"Failed with status {response.StatusCode}";
+                _storageError = await ExtractStorageErrorAsync(response);
             }
         }
         catch (Exception ex)
@@ -257,6 +362,42 @@ else
         }
     }
 
+    private static async Task<string> ExtractStorageErrorAsync(HttpResponseMessage response)
+    {
+        var payload = await response.Content.ReadAsStringAsync();
+
+        if (string.IsNullOrWhiteSpace(payload))
+            return $"Failed with status {(int)response.StatusCode} ({response.StatusCode})";
+
+        try
+        {
+            var storageError = System.Text.Json.JsonSerializer.Deserialize<StorageUpdateDto>(payload, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+            if (!string.IsNullOrWhiteSpace(storageError?.Message))
+                return storageError.Message;
+        }
+        catch
+        {
+            // Fall through to generic parsing paths.
+        }
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(payload);
+            if (doc.RootElement.TryGetProperty("detail", out var detail) && detail.ValueKind == System.Text.Json.JsonValueKind.String)
+                return detail.GetString() ?? $"Failed with status {(int)response.StatusCode} ({response.StatusCode})";
+            if (doc.RootElement.TryGetProperty("title", out var title) && title.ValueKind == System.Text.Json.JsonValueKind.String)
+                return title.GetString() ?? $"Failed with status {(int)response.StatusCode} ({response.StatusCode})";
+        }
+        catch
+        {
+            // Ignore non-JSON payloads.
+        }
+
+        return payload.Length <= 300
+            ? payload
+            : payload[..300] + "...";
+    }
+
     private sealed class SchedulerSettingsDto
     {
         public int MaxConcurrentJobs { get; set; } = 3;
@@ -271,11 +412,27 @@ else
         public string AgentStoragePath { get; set; } = string.Empty;
     }
 
+    private sealed class ToolLoggingSettingsDto
+    {
+        public bool Enabled { get; set; }
+        public int ArgumentPreviewLength { get; set; }
+        public int OutputPreviewLength { get; set; }
+    }
+
+    private sealed class ToolLoggingUpdateRequestDto
+    {
+        public bool Enabled { get; set; }
+    }
+
     private sealed class StorageUpdateDto
     {
         public bool Success { get; set; }
         public string Message { get; set; } = string.Empty;
         public string? NewPath { get; set; }
     }
-}
 
+    private sealed class StorageUpdateRequestDto
+    {
+        public string RootPath { get; set; } = string.Empty;
+    }
+}

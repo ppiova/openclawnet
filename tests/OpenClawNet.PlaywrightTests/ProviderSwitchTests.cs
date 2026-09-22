@@ -8,13 +8,13 @@ namespace OpenClawNet.PlaywrightTests;
 /// API-level tests for runtime provider switching — covers demo-06 provider-switch scenarios.
 /// Validates that the settings API exposes provider info and supports live updates.
 /// </summary>
-[Collection("AppHost")]
+[Collection("AspireHost")]
 public class ProviderSwitchTests : IAsyncLifetime
 {
-    private readonly AppHostFixture _fixture;
+    private readonly AspireHostFixture _fixture;
     private HttpClient _client = null!;
 
-    public ProviderSwitchTests(AppHostFixture fixture)
+    public ProviderSwitchTests(AspireHostFixture fixture)
     {
         _fixture = fixture;
     }
@@ -32,7 +32,7 @@ public class ProviderSwitchTests : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Settings_GetCurrentSettings_ReturnsProviderInfo()
     {
         var response = await _client.GetAsync("/api/settings");
@@ -48,7 +48,7 @@ public class ProviderSwitchTests : IAsyncLifetime
         Assert.True(json.TryGetProperty("hasApiKey", out _), "Settings should contain hasApiKey");
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Settings_PutSettings_UpdatesProvider()
     {
         // Capture current settings for restore

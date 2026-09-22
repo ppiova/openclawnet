@@ -85,11 +85,41 @@ See the **What's Where** section in [SETUP.md](./SETUP.md#11-whats-where) for a 
 
 ---
 
+## 📦 Versioning & Release
+
+OpenClaw .NET v1.0.0 is intended to be the project's **first, source-only GitHub release**, cut from the current `main` branch.
+
+- OpenClawNet projects are **not published to NuGet.org**.
+- The `v1.0.0` tag is the release gate for `.github/workflows/release.yml`; do not create or push the tag until that workflow is present on the exact `main` commit being released.
+- The release contains no uploaded binaries or packages. GitHub's automatically generated source `.zip` and `.tar.gz` archives are the only downloads.
+- Package versions are defined in the individual project files. `SixLabors.ImageSharp` remains at **3.1.12 (MIT)** because 4.x requires a commercial-license decision.
+- PR CI validates the offline Windows `win-x64` unit and mocked Azure unit test projects. Integration, E2E, Playwright, deployment, and live-service tests remain environment-dependent and are not part of the PR gate.
+
+See [**Release Guidance**](./docs/release/RELEASE-GUIDANCE.md) for the exact tag process, CI scope, and validation blockers.
+
+---
+
 ## 💬 Community
 
 - **Discord:** [Microsoft Foundry Community](https://aka.ms/ai-discord/dotnet) (.NET channel)
 - **Issues:** [Open an issue](https://github.com/elbruno/openclawnet/issues)
 - **Resources:** [Generative AI for Beginners .NET](https://aka.ms/genainet) · [.NET Aspire](https://aspire.dev)
+
+---
+
+## 👋 About the Author
+
+Hi! I'm **ElBruno** 🧡, a passionate developer and content creator exploring AI, .NET, and modern development practices.
+
+**Made with ❤️ by [ElBruno](https://github.com/elbruno)**
+
+If you like this project, consider following my work across platforms:
+
+- 🔗 **Blog**: [ElBruno.com](https://elbruno.com) — Deep dives on embeddings, RAG, .NET, and local AI
+- 💻 **YouTube**: [youtube.com/elbruno](https://www.youtube.com/elbruno) — Demos, tutorials, and live coding
+- 📺 **LinkedIn**: [@elbruno](https://www.linkedin.com/in/elbruno/) — Professional updates and insights
+- 𝕏 **Twitter**: [@elbruno](https://www.x.com/elbruno/) — Quick tips, releases, and tech news
+- 📻 **Podcast**: [No Tienen Nombre](https://notienenombre.com) — Spanish-language episodes on AI, development, and tech culture
 
 ---
 

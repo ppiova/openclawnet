@@ -7,38 +7,36 @@ namespace OpenClawNet.PlaywrightTests;
 /// E2E tests for the Blazor Web UI chat flow — covers aspire-stack demo 02.
 /// Validates new chat creation, message sending, and session list updates.
 /// </summary>
-[Collection("AppHost")]
-public class ChatFlowTests : PlaywrightTestBase
+[Collection("AspireHost")]
+public class ChatFlowTests : AspireHostPlaywrightTestBase
 {
-    public ChatFlowTests(AppHostFixture fixture) : base(fixture)
+    public ChatFlowTests(AspireHostFixture fixture) : base(fixture)
     {
     }
 
     // ── Demo 02: New Chat + Streaming Response ────────────────────────────────
 
-    [Fact]
+    [SkippableFact]
     [Trait("Category", "RequiresModel")]
     public async Task Chat_NewChatAndSendMessage_ShowsStreamingResponse()
     {
         await WithScreenshotOnFailure(async () =>
         {
-            await Page.GotoAsync(Fixture.WebBaseUrl, new PageGotoOptions
+            // Warmup: Navigate to /chat first to initialize Blazor circuit, then reload
+            await Page.GotoAsync($"{Fixture.WebBaseUrl}/chat", new PageGotoOptions
+            {
+                WaitUntil = WaitUntilState.NetworkIdle,
+                Timeout = 60_000
+            });
+            await Page.ReloadAsync(new PageReloadOptions
             {
                 WaitUntil = WaitUntilState.NetworkIdle,
                 Timeout = 60_000
             });
 
-            // Look for the New Chat button (could be a "+" button or "New Chat" text)
-            var newChatBtn = Page.Locator("button:has-text('New Chat'), button[title*='New'], a:has-text('New Chat')").First;
-            if (await newChatBtn.IsVisibleAsync())
-            {
-                await newChatBtn.ClickAsync();
-                await Page.WaitForTimeoutAsync(1_000);
-            }
-
             // Find the chat input using the data-testid
             var chatInput = Page.Locator("[data-testid='chat-input']");
-            await Assertions.Expect(chatInput).ToBeVisibleAsync(new() { Timeout = 30_000 });
+            await Assertions.Expect(chatInput).ToBeVisibleAsync(new() { Timeout = 90_000 });
             await chatInput.FillAsync("Say hello in exactly 3 words.");
 
             // Submit — press Enter or click Send button
@@ -77,7 +75,7 @@ public class ChatFlowTests : PlaywrightTestBase
         });
     }
 
-    [Fact]
+    [SkippableFact]
     [Trait("Category", "RequiresModel")]
     public async Task Chat_AfterSendingMessage_SessionAppearsInSessionsPanel()
     {

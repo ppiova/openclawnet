@@ -7,16 +7,16 @@ namespace OpenClawNet.PlaywrightTests;
 /// E2E tests for the Settings and Skills UI pages — covers aspire-stack demos 04 and 06.
 /// Validates that the settings and skills pages render correctly.
 /// </summary>
-[Collection("AppHost")]
-public class SettingsAndSkillsTests : PlaywrightTestBase
+[Collection("AspireHost")]
+public class SettingsAndSkillsTests : AspireHostPlaywrightTestBase
 {
-    public SettingsAndSkillsTests(AppHostFixture fixture) : base(fixture)
+    public SettingsAndSkillsTests(AspireHostFixture fixture) : base(fixture)
     {
     }
 
     // ── Demo 04: Skills Page ──────────────────────────────────────────────────
 
-    [Fact]
+    [SkippableFact]
     public async Task SkillsPage_Loads_ShowsSkillsList()
     {
         await WithScreenshotOnFailure(async () =>
@@ -44,7 +44,7 @@ public class SettingsAndSkillsTests : PlaywrightTestBase
 
     // ── Demo 06: Settings Page ────────────────────────────────────────────────
 
-    [Fact]
+    [SkippableFact]
     public async Task SettingsPage_Loads_ShowsSchedulerSettings()
     {
         await WithScreenshotOnFailure(async () =>
@@ -65,10 +65,14 @@ public class SettingsAndSkillsTests : PlaywrightTestBase
             // Settings page shows Scheduler settings card
             var schedulerCard = Page.Locator(".card:has-text('Scheduler')").First;
             await Assertions.Expect(schedulerCard).ToBeVisibleAsync(new() { Timeout = 10_000 });
+
+            // Settings page shows Tool Execution Logging card
+            var toolLoggingCard = Page.Locator(".card:has-text('Tool Execution Logging')").First;
+            await Assertions.Expect(toolLoggingCard).ToBeVisibleAsync(new() { Timeout = 10_000 });
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task SettingsPage_GatewaySettingsApi_ReturnsCurrentSettings()
     {
         await WithScreenshotOnFailure(async () =>
@@ -82,9 +86,23 @@ public class SettingsAndSkillsTests : PlaywrightTestBase
         });
     }
 
+    [SkippableFact]
+    public async Task SettingsPage_GatewayToolLoggingApi_ReturnsCurrentSettings()
+    {
+        await WithScreenshotOnFailure(async () =>
+        {
+            using var client = Fixture.CreateGatewayHttpClient();
+            var response = await client.GetAsync("/api/settings/tool-logging");
+
+            Assert.True(response.IsSuccessStatusCode, $"Tool logging API returned {response.StatusCode}");
+            var json = await response.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>();
+            Assert.True(json.TryGetProperty("enabled", out _), "Tool logging settings should include enabled");
+        });
+    }
+
     // ── Skills Details + Settings Provider Selection ──────────────────────────
 
-    [Fact]
+    [SkippableFact]
     public async Task SkillsPage_ShowsSkillDetails_WhenExpanded()
     {
         await WithScreenshotOnFailure(async () =>
@@ -116,7 +134,7 @@ public class SettingsAndSkillsTests : PlaywrightTestBase
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task ModelProvidersPage_Loads_ShowsProviderTable()
     {
         await WithScreenshotOnFailure(async () =>
@@ -143,7 +161,7 @@ public class SettingsAndSkillsTests : PlaywrightTestBase
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task ModelProvidersPage_GatewayApi_ReturnsProviders()
     {
         await WithScreenshotOnFailure(async () =>
@@ -160,7 +178,7 @@ public class SettingsAndSkillsTests : PlaywrightTestBase
 
     // ── Agent Profiles Page ───────────────────────────────────────────────────
 
-    [Fact]
+    [SkippableFact]
     public async Task AgentProfilesPage_Loads_ShowsProfilesList()
     {
         await WithScreenshotOnFailure(async () =>

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using OpenClawNet.Models.Abstractions;
+using OpenClawNet.Skills;
 using OpenClawNet.Storage;
 using OpenClawNet.Storage.Entities;
 
@@ -35,34 +36,35 @@ public static class AgentProfileEndpoints
         .WithName("GetAgentProfile")
         .WithDescription("Returns a specific agent profile by name");
 
+        group.MapPost("/", async (AgentProfileRequest request, IAgentProfileStore store, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(request.Name))
+                return Results.BadRequest(new { error = "Profile name is required." });
+
+            var existing = await store.GetAsync(request.Name, ct);
+            var profile = BuildProfile(request.Name, request, existing);
+
+            await store.SaveAsync(profile, ct);
+            return existing is null
+                ? Results.Created($"/api/agent-profiles/{profile.Name}", ToResponse(profile))
+                : Results.Ok(ToResponse(profile));
+        })
+        .WithName("CreateAgentProfile")
+        .WithDescription("Creates or updates an agent profile from a request body that includes the profile name");
+
         group.MapPut("/{name}", async (string name, AgentProfileRequest request, IAgentProfileStore store, CancellationToken ct) =>
         {
-            var kind = ProfileKind.Standard;
-            if (!string.IsNullOrWhiteSpace(request.Kind) &&
-                !Enum.TryParse(request.Kind, ignoreCase: true, out kind))
-            {
-                return Results.BadRequest(new { error = $"Unknown kind '{request.Kind}'. Use Standard, System, or ToolTester." });
-            }
+            var existing = await store.GetAsync(name, ct);
+            AgentProfile profile;
 
-            var profile = new AgentProfile
+            try
             {
-                Name = name,
-                DisplayName = request.DisplayName,
-                Provider = request.Provider,
-                Model = request.Model,
-                Instructions = request.Instructions,
-                EnabledTools = request.EnabledTools is { Length: > 0 }
-                    ? string.Join(", ", request.EnabledTools)
-                    : null,
-                Temperature = request.Temperature,
-                MaxTokens = request.MaxTokens,
-                IsDefault = request.IsDefault,
-                Kind = kind,
-                RequireToolApproval = request.RequireToolApproval,
-                IsEnabled = request.IsEnabled ?? true,
-                CreatedAt = DateTime.UtcNow,
-                UpdatedAt = DateTime.UtcNow,
-            };
+                profile = BuildProfile(name, request, existing);
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
 
             // Only Standard profiles may be marked as default. Defensively coerce so
             // a malformed client request doesn't promote a System/ToolTester to default.
@@ -182,8 +184,72 @@ public static class AgentProfileEndpoints
         .WithDescription("Bulk-deletes agent profiles. The default profile is never deleted and is returned under 'skipped'.")
         .Accepts<BulkDeleteAgentProfilesRequest>("application/json");
 
+        // ── Agent skill assignment endpoints ─────────────────────────────
+
+        group.MapGet("/{name}/skills", async (
+            string name,
+            IAgentProfileStore store,
+            IAgentSkillAssignmentService assignments,
+            CancellationToken ct) =>
+        {
+            var profile = await store.GetAsync(name, ct);
+            if (profile is null) return Results.NotFound();
+            var assigned = await assignments.GetAssignedAsync(name, ct);
+            return Results.Ok(new AgentSkillsResponse(name, assigned));
+        })
+        .WithName("GetAgentProfileSkills")
+        .WithDescription("Returns the skills currently assigned to an agent profile.");
+
+        group.MapPut("/{name}/skills", async (
+            string name,
+            [FromBody] AgentSkillsRequest request,
+            IAgentProfileStore store,
+            IAgentSkillAssignmentService assignments,
+            CancellationToken ct) =>
+        {
+            var profile = await store.GetAsync(name, ct);
+            if (profile is null) return Results.NotFound();
+            var result = await assignments.SyncAssignmentsAsync(name, request.SkillNames ?? [], ct);
+            return Results.Ok(new AgentSkillsSyncResponse(name, result.Assigned, result.Unassigned, result.NotFound));
+        })
+        .WithName("SyncAgentSkills")
+        .WithDescription("Replaces the full skill assignment for an agent: assigns new, unassigns removed.");
+
+        group.MapPost("/{name}/skills/{skillName}", async (
+            string name,
+            string skillName,
+            IAgentProfileStore store,
+            IAgentSkillAssignmentService assignments,
+            CancellationToken ct) =>
+        {
+            var profile = await store.GetAsync(name, ct);
+            if (profile is null) return Results.NotFound();
+            var ok = await assignments.AssignAsync(skillName, name, ct);
+            return ok
+                ? Results.Ok(new { agentName = name, skillName, assigned = true })
+                : Results.NotFound(new { error = $"Skill '{skillName}' not found in system or installed layers." });
+        })
+        .WithName("AssignAgentSkill")
+        .WithDescription("Assigns a single skill to an agent profile.");
+
+        group.MapDelete("/{name}/skills/{skillName}", async (
+            string name,
+            string skillName,
+            IAgentProfileStore store,
+            IAgentSkillAssignmentService assignments,
+            CancellationToken ct) =>
+        {
+            var profile = await store.GetAsync(name, ct);
+            if (profile is null) return Results.NotFound();
+            await assignments.UnassignAsync(skillName, name, ct);
+            return Results.NoContent();
+        })
+        .WithName("UnassignAgentSkill")
+        .WithDescription("Removes a skill assignment from an agent profile.");
+
         group.MapPost("/{name}/test", async (
             string name,
+            [FromBody] AgentProfileTestOverrides? overrides,
             IAgentProfileStore profileStore,
             IModelProviderDefinitionStore providerStore,
             IEnumerable<IAgentProvider> providers,
@@ -193,7 +259,19 @@ public static class AgentProfileEndpoints
             var profile = await profileStore.GetAsync(name, ct);
             if (profile is null) return Results.NotFound();
 
-            logger.LogInformation("Testing agent profile '{Name}' (provider={Provider})", name, profile.Provider);
+            // Issue #236: resolve transient test-only values. Non-blank overrides win over
+            // the stored profile so the UI can test unsaved form edits (e.g. a newly selected
+            // Model Provider) without requiring a save-first workflow. Mirrors the approved
+            // ModelProviderTestOverrides pattern — `profile` and `entity` are NEVER mutated
+            // with override values, only with test-result metadata below.
+            var testProviderName = (!string.IsNullOrWhiteSpace(overrides?.Provider))
+                ? overrides.Provider : profile.Provider;
+            var testModel = (!string.IsNullOrWhiteSpace(overrides?.Model))
+                ? overrides.Model : profile.Model;
+            var testInstructions = overrides?.Instructions ?? profile.Instructions;
+            var testRetrievalLevel = overrides?.RetrievalLevel ?? profile.RetrievalLevel;
+
+            logger.LogInformation("Testing agent profile '{Name}' (provider={Provider})", name, testProviderName);
 
             var entity = await profileStore.GetEntityAsync(name, ct);
             if (entity is not null)
@@ -201,23 +279,23 @@ public static class AgentProfileEndpoints
                 entity.LastTestedAt = DateTime.UtcNow;
             }
 
-            // Resolve the model provider definition
+            // Resolve the model provider definition using the (possibly overridden) provider name.
             ModelProviderDefinition? definition = null;
-            if (!string.IsNullOrEmpty(profile.Provider))
-                definition = await providerStore.GetAsync(profile.Provider, ct);
+            if (!string.IsNullOrEmpty(testProviderName))
+                definition = await providerStore.GetAsync(testProviderName, ct);
 
             if (definition is null)
             {
                 if (entity is not null)
                 {
                     entity.LastTestSucceeded = false;
-                    entity.LastTestError = $"Provider '{profile.Provider}' not found";
+                    entity.LastTestError = $"Provider '{testProviderName}' not found";
                     entity.UpdatedAt = DateTime.UtcNow;
                     await profileStore.SaveEntityAsync(entity, ct);
                 }
                 return Results.Ok(new { 
                     success = false, 
-                    message = $"Provider '{profile.Provider}' not found",
+                    message = $"Provider '{testProviderName}' not found",
                     lastTestedAt = entity?.LastTestedAt,
                     lastTestSucceeded = entity?.LastTestSucceeded,
                     lastTestError = entity?.LastTestError
@@ -256,10 +334,14 @@ public static class AgentProfileEndpoints
                     Name = $"test-{name}",
                     Provider = definition.ProviderType,
                     Endpoint = definition.Endpoint,
+                    // Issue #122: prefer the (possibly overridden) model, fall back to the provider
+                    // definition's model so Ollama and other providers receive a concrete model name.
+                    Model = testModel ?? definition.Model,
                     ApiKey = definition.ApiKey,
                     DeploymentName = definition.DeploymentName,
                     AuthMode = definition.AuthMode,
-                    Instructions = profile.Instructions,
+                    Instructions = testInstructions,
+                    RetrievalLevel = testRetrievalLevel
                 };
 
                 var chatClient = agentProvider.CreateChatClient(testProfile);
@@ -315,7 +397,8 @@ public static class AgentProfileEndpoints
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Agent test '{Name}' failed", name);
-                var errorMsg = $"Test failed: {ex.Message}";
+                var sanitized = VaultReferenceSanitizer.SanitizeFailureMessage(ex.Message) ?? ex.Message;
+                var errorMsg = $"Test failed: {sanitized}";
                 var truncatedError = errorMsg.Length > 1000 ? errorMsg[..1000] : errorMsg;
                 if (entity is not null)
                 {
@@ -342,8 +425,52 @@ public static class AgentProfileEndpoints
         string.IsNullOrWhiteSpace(p.EnabledTools)
             ? null
             : p.EnabledTools.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
-        p.Temperature, p.MaxTokens, p.IsDefault, p.RequireToolApproval, p.IsEnabled,
-        p.LastTestedAt, p.LastTestSucceeded, p.LastTestError, p.Kind.ToString());
+        p.Temperature, p.MaxTokens, p.IsDefault, p.RequireToolApproval, p.IsEnabled, p.RetrievalLevel,
+        p.LastTestedAt, p.LastTestSucceeded, p.LastTestError, p.Kind.ToString(),
+        p.Endpoint, GetApiKeyDisplayValue(p.ApiKey), p.DeploymentName, p.AuthMode);
+
+    private static AgentProfile BuildProfile(string name, AgentProfileRequest request, AgentProfile? existing)
+    {
+        var kind = ProfileKind.Standard;
+        if (!string.IsNullOrWhiteSpace(request.Kind) &&
+            !Enum.TryParse(request.Kind, ignoreCase: true, out kind))
+        {
+            throw new ArgumentException($"Unknown kind '{request.Kind}'. Use Standard, System, or ToolTester.");
+        }
+
+        return new AgentProfile
+        {
+            Name = name,
+            DisplayName = request.DisplayName,
+            Provider = request.Provider,
+            Model = request.Model ?? existing?.Model,
+            Endpoint = request.Endpoint ?? existing?.Endpoint,
+            ApiKey = string.IsNullOrEmpty(request.ApiKey) ? existing?.ApiKey : request.ApiKey,
+            DeploymentName = request.DeploymentName ?? existing?.DeploymentName,
+            AuthMode = request.AuthMode ?? existing?.AuthMode,
+            Instructions = request.Instructions,
+            EnabledTools = request.EnabledTools is { Length: > 0 }
+                ? string.Join(", ", request.EnabledTools)
+                : null,
+            Temperature = request.Temperature,
+            MaxTokens = request.MaxTokens,
+            IsDefault = request.IsDefault,
+            Kind = kind,
+            RequireToolApproval = request.RequireToolApproval,
+            IsEnabled = request.IsEnabled ?? existing?.IsEnabled ?? true,
+            RetrievalLevel = request.RetrievalLevel ?? existing?.RetrievalLevel ?? RetrievalLevel.Off,
+            LastTestedAt = existing?.LastTestedAt,
+            LastTestSucceeded = existing?.LastTestSucceeded,
+            LastTestError = existing?.LastTestError,
+            CreatedAt = existing?.CreatedAt ?? DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+    }
+
+    private static string? GetApiKeyDisplayValue(string? value) =>
+        VaultConfigurationResolver.TryParseVaultReference(value, out _)
+            ? VaultReferenceSanitizer.RedactedReferenceDisplay
+            : null;
 }
 
 public sealed record AgentProfileResponse(
@@ -358,10 +485,15 @@ public sealed record AgentProfileResponse(
     bool IsDefault,
     bool RequireToolApproval,
     bool IsEnabled,
+    RetrievalLevel RetrievalLevel,
     DateTime? LastTestedAt,
     bool? LastTestSucceeded,
     string? LastTestError,
-    string Kind);
+    string Kind,
+    string? Endpoint = null,
+    string? ApiKey = null,
+    string? DeploymentName = null,
+    string? AuthMode = null);
 
 public sealed record SetEnabledRequest(bool IsEnabled);
 
@@ -379,6 +511,10 @@ public sealed record AgentProfileRequest(
     string? DisplayName,
     string? Provider,
     string? Model,
+    string? Endpoint,
+    string? ApiKey,
+    string? DeploymentName,
+    string? AuthMode,
     string? Instructions,
     string[]? EnabledTools,
     double? Temperature,
@@ -386,4 +522,33 @@ public sealed record AgentProfileRequest(
     bool IsDefault,
     bool RequireToolApproval = true,
     bool? IsEnabled = true,
-    string? Kind = "Standard");
+    RetrievalLevel? RetrievalLevel = null,
+    string? Kind = "Standard",
+    string? Name = null);
+
+/// <summary>
+/// Optional override values supplied by the UI when testing an agent profile from the
+/// edit form before saving (Issue #236). Non-blank values replace the stored profile's
+/// values for the duration of the test only; the stored profile and its persisted entity
+/// are never mutated with these values — only test-result metadata is persisted.
+/// </summary>
+public sealed record AgentProfileTestOverrides(
+    string? Provider,
+    string? Model,
+    string? Instructions,
+    RetrievalLevel? RetrievalLevel);
+
+// ── Agent skill assignment DTOs ──────────────────────────────────────────────
+
+public sealed record AgentSkillsResponse(
+    string AgentName,
+    IReadOnlyList<string> AssignedSkills);
+
+public sealed record AgentSkillsRequest(
+    string[]? SkillNames);
+
+public sealed record AgentSkillsSyncResponse(
+    string AgentName,
+    IReadOnlyList<string> Assigned,
+    IReadOnlyList<string> Unassigned,
+    IReadOnlyList<string> NotFound);

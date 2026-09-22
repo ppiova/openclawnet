@@ -9,15 +9,15 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\..\..\..\src\OpenClawNet.Models.Abstractions\OpenClawNet.Models.Abstractions.csproj" />
-    <ProjectReference Include="..\..\..\..\..\src\OpenClawNet.Models.Ollama\OpenClawNet.Models.Ollama.csproj" />
-    <ProjectReference Include="..\..\..\..\..\src\OpenClawNet.Models.AzureOpenAI\OpenClawNet.Models.AzureOpenAI.csproj" />
-    <ProjectReference Include="..\..\..\..\..\src\OpenClawNet.Models.GitHubCopilot\OpenClawNet.Models.GitHubCopilot.csproj" />
+    <ProjectReference Include="..\..\..\..\..\..\src\OpenClawNet.Models.Abstractions\OpenClawNet.Models.Abstractions.csproj" />
+    <ProjectReference Include="..\..\..\..\..\..\src\OpenClawNet.Models.Ollama\OpenClawNet.Models.Ollama.csproj" />
+    <ProjectReference Include="..\..\..\..\..\..\src\OpenClawNet.Models.AzureOpenAI\OpenClawNet.Models.AzureOpenAI.csproj" />
+    <ProjectReference Include="..\..\..\..\..\..\src\OpenClawNet.Models.GitHubCopilot\OpenClawNet.Models.GitHubCopilot.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.6" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.6" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.11" />
   </ItemGroup>
 
 </Project>

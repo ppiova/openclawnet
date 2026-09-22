@@ -66,10 +66,11 @@ public static class ChatStreamEndpoints
             if (!useAgentProviderPath)
             {
                 // Standard path: sync RuntimeModelSettings and use the orchestrator
-                if (resolvedProvider?.DefinitionName is not null)
+                var runtimeSettings = httpContext.RequestServices.GetService<RuntimeModelSettings>();
+                if (runtimeSettings is not null)
                 {
-                    var runtimeSettings = httpContext.RequestServices.GetService<RuntimeModelSettings>();
-                    if (runtimeSettings is not null)
+                    // Priority: resolved provider definition → direct profile settings
+                    if (resolvedProvider?.DefinitionName is not null)
                     {
                         runtimeSettings.Update(new ModelProviderConfig
                         {
@@ -79,6 +80,19 @@ public static class ChatStreamEndpoints
                             ApiKey = resolvedProvider.ApiKey,
                             DeploymentName = NullIfEmpty(resolvedProvider.DeploymentName),
                             AuthMode = resolvedProvider.AuthMode,
+                        });
+                    }
+                    else if (profile.Provider is not null)
+                    {
+                        // Fallback: profile has direct provider/model without a definition
+                        runtimeSettings.Update(new ModelProviderConfig
+                        {
+                            Provider = profile.Provider,
+                            Model = NullIfEmpty(profile.Model),
+                            Endpoint = profile.Endpoint,
+                            ApiKey = profile.ApiKey,
+                            DeploymentName = NullIfEmpty(profile.DeploymentName),
+                            AuthMode = profile.AuthMode,
                         });
                     }
                 }
@@ -108,7 +122,8 @@ public static class ChatStreamEndpoints
                     AgentProfileInstructions = profile.Instructions,
                     ResolvedProvider = resolvedProvider,
                     RequireToolApproval = profile.RequireToolApproval,
-                    EnabledTools = ParseEnabledTools(profile.EnabledTools)
+                    EnabledTools = ParseEnabledTools(profile.EnabledTools),
+                    RetrievalLevel = profile.RetrievalLevel
                 };
 
                 await StreamViaOrchestratorAsync(

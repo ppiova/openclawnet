@@ -89,6 +89,7 @@ public static class SchemaMigrator
         await AddColumnIfMissingAsync(db, "AgentProfiles", "Temperature", "REAL");
         await AddColumnIfMissingAsync(db, "AgentProfiles", "MaxTokens", "INTEGER");
         await AddColumnIfMissingAsync(db, "AgentProfiles", "IsDefault", "INTEGER NOT NULL DEFAULT 0");
+        await AddColumnIfMissingAsync(db, "AgentProfiles", "RetrievalLevel", "TEXT NOT NULL DEFAULT 'Off'");
         await AddColumnIfMissingAsync(db, "AgentProfiles", "CreatedAt", "TEXT");
         await AddColumnIfMissingAsync(db, "AgentProfiles", "UpdatedAt", "TEXT");
 
@@ -105,6 +106,9 @@ public static class SchemaMigrator
 
         // AgentProfiles table: Kind discriminator (Standard | System | ToolTester)
         await AddColumnIfMissingAsync(db, "AgentProfiles", "Kind", "TEXT NOT NULL DEFAULT 'Standard'");
+
+        // AgentProfiles table: Model column — re-added in commit c5c12a9 for per-profile model selection
+        await AddColumnIfMissingAsync(db, "AgentProfiles", "Model", "TEXT");
 
         // Messages table: Tool approval bubbles — Phase A
         await AddColumnIfMissingAsync(db, "Messages", "MessageType", "TEXT DEFAULT 'Chat'");
@@ -126,6 +130,7 @@ public static class SchemaMigrator
                 Temperature REAL,
                 MaxTokens INTEGER,
                 IsDefault INTEGER NOT NULL DEFAULT 0,
+                RetrievalLevel TEXT NOT NULL DEFAULT 'Off',
                 CreatedAt TEXT NOT NULL,
                 UpdatedAt TEXT NOT NULL
             )
@@ -198,9 +203,57 @@ public static class SchemaMigrator
                 Name TEXT NOT NULL PRIMARY KEY,
                 EncryptedValue TEXT NOT NULL,
                 Description TEXT,
+                CreatedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                DeletedAt TEXT,
+                PurgeAfter TEXT,
                 UpdatedAt TEXT NOT NULL
             )
             """);
+        await AddColumnIfMissingAsync(db, "Secrets", "CreatedAt", "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP");
+        await AddColumnIfMissingAsync(db, "Secrets", "DeletedAt", "TEXT");
+        await AddColumnIfMissingAsync(db, "Secrets", "PurgeAfter", "TEXT");
+
+        await CreateTableIfMissingAsync(db, "SecretVersions",
+            """
+            CREATE TABLE SecretVersions (
+                Id TEXT NOT NULL PRIMARY KEY,
+                SecretName TEXT NOT NULL,
+                Version INTEGER NOT NULL,
+                EncryptedValue TEXT NOT NULL,
+                CreatedAt TEXT NOT NULL,
+                IsCurrent INTEGER NOT NULL,
+                SupersededAt TEXT,
+                FOREIGN KEY (SecretName) REFERENCES Secrets(Name) ON DELETE CASCADE
+            )
+            """);
+        await CreateIndexIfMissingAsync(db, "IX_SecretVersions_SecretName_Version",
+            "CREATE UNIQUE INDEX IX_SecretVersions_SecretName_Version ON SecretVersions(SecretName, Version)");
+        await CreateIndexIfMissingAsync(db, "IX_SecretVersions_Current",
+            "CREATE INDEX IX_SecretVersions_Current ON SecretVersions(SecretName, IsCurrent)");
+        await CreateIndexIfMissingAsync(db, "UX_SecretVersions_Current",
+            "CREATE UNIQUE INDEX UX_SecretVersions_Current ON SecretVersions(SecretName) WHERE IsCurrent = 1");
+
+        await CreateTableIfMissingAsync(db, "SecretAccessAudit",
+            """
+            CREATE TABLE SecretAccessAudit (
+                Id TEXT NOT NULL PRIMARY KEY,
+                SecretName TEXT NOT NULL,
+                CallerType TEXT NOT NULL,
+                CallerId TEXT NOT NULL,
+                SessionId TEXT,
+                AccessedAt TEXT NOT NULL,
+                Success INTEGER NOT NULL,
+                PreviousRowHash TEXT,
+                RowHash TEXT
+            )
+            """);
+        await AddColumnIfMissingAsync(db, "SecretAccessAudit", "PreviousRowHash", "TEXT");
+        await AddColumnIfMissingAsync(db, "SecretAccessAudit", "RowHash", "TEXT");
+        await CreateIndexIfMissingAsync(db, "IX_SecretAccessAudit_SecretName_AccessedAt",
+            "CREATE INDEX IX_SecretAccessAudit_SecretName_AccessedAt ON SecretAccessAudit(SecretName, AccessedAt)");
+        await CreateIndexIfMissingAsync(db, "IX_SecretAccessAudit_RowHash",
+            "CREATE INDEX IX_SecretAccessAudit_RowHash ON SecretAccessAudit(RowHash)");
+        await SecretAccessAuditHashChain.BootstrapMissingHashesAsync(db).ConfigureAwait(false);
 
         // JobRunEvents table — append-only timeline of what happened during a JobRun.
         // Survives app restart (unlike OTEL traces). Cascade-deletes with the parent run.
@@ -381,10 +434,27 @@ public static class SchemaMigrator
         await CreateIndexIfMissingAsync(db, "IX_AdapterDeliveryLogs_CreatedAt",
             "CREATE INDEX IX_AdapterDeliveryLogs_CreatedAt ON AdapterDeliveryLogs(CreatedAt)");
 
-        // PR-F: drop the legacy AgentProfiles.Model column.The agent now references a
-        // ModelProviderDefinition whose own Model field is authoritative — see Bruno's
-        // directive on the agent-UI redesign. Idempotent via the SchemaVersions marker.
-        await DropAgentProfileModelColumnAsync(db);
+        // S5-5: OAuth token storage (encrypted via DataProtection)
+        await CreateTableIfMissingAsync(db, "OAuthTokens",
+            """
+            CREATE TABLE OAuthTokens (
+                Id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                Provider TEXT NOT NULL,
+                UserId TEXT NOT NULL,
+                AccessTokenCiphertext TEXT NOT NULL,
+                RefreshTokenCiphertext TEXT NOT NULL,
+                ExpiresAtUtc TEXT NOT NULL,
+                Scopes TEXT NOT NULL,
+                CreatedAt TEXT NOT NULL,
+                UpdatedAt TEXT NOT NULL
+            )
+            """);
+        await CreateIndexIfMissingAsync(db, "IX_OAuthTokens_Provider_UserId",
+            "CREATE UNIQUE INDEX IX_OAuthTokens_Provider_UserId ON OAuthTokens(Provider, UserId)");
+
+        // PR-F reverted by commit c5c12a9: Model column is REQUIRED for per-profile model selection.
+        // Tests create profiles with explicit Model values (e.g. "gemma4:e2b"). Do NOT drop this column.
+        // await DropAgentProfileModelColumnAsync(db);
 
         // PR-E: destructive seed of the 4 bundled MCP servers + remap of legacy
         // EnabledTools entries. Gated by the SchemaVersion marker so it runs once.

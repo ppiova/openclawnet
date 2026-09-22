@@ -7,16 +7,16 @@ namespace OpenClawNet.PlaywrightTests;
 /// E2E tests for Aspire dashboard reachability — covers aspire-stack demo 01 and 07.
 /// Validates that the Aspire dashboard and web UI are accessible.
 /// </summary>
-[Collection("AppHost")]
-public class AspireDashboardTests : PlaywrightTestBase
+[Collection("AspireHost")]
+public class AspireDashboardTests : AspireHostPlaywrightTestBase
 {
-    public AspireDashboardTests(AppHostFixture fixture) : base(fixture)
+    public AspireDashboardTests(AspireHostFixture fixture) : base(fixture)
     {
     }
 
     // ── Demo 01: Aspire Dashboard Reachability ────────────────────────────────
 
-    [Fact]
+    [SkippableFact]
     public async Task Dashboard_WebAppHomePage_IsReachable()
     {
         await WithScreenshotOnFailure(async () =>
@@ -33,7 +33,7 @@ public class AspireDashboardTests : PlaywrightTestBase
         });
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task Dashboard_GatewayHealth_IsAccessibleFromWeb()
     {
         await WithScreenshotOnFailure(async () =>
@@ -49,7 +49,7 @@ public class AspireDashboardTests : PlaywrightTestBase
 
     // ── Demo 07: Web UI reflects chat interactions ────────────────────────────
 
-    [Fact]
+    [SkippableFact]
     [Trait("Category", "RequiresModel")]
     public async Task WebUI_AfterChatInteraction_SessionsListUpdates()
     {

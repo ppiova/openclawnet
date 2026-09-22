@@ -23,6 +23,8 @@ using OpenClawNet.Tools.MarkItDown;
 using OpenClawNet.Tools.Calculator;
 using OpenClawNet.Tools.Embeddings;
 using OpenClawNet.Tools.GitHub;
+using OpenClawNet.Tools.Dashboard;
+using OpenClawNet.Tools.GoogleWorkspace;
 using OpenClawNet.Tools.HtmlQuery;
 using OpenClawNet.Tools.ImageEdit;
 using OpenClawNet.Tools.Text2Image;
@@ -40,6 +42,7 @@ using OpenClawNet.Mcp.Web;
 using OpenClawNet.Channels.Adapters;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Configuration.AddJsonFile("storage-settings.json", optional: true, reloadOnChange: false);
 
 // Aspire service defaults
 builder.AddServiceDefaults();
@@ -155,20 +158,20 @@ builder.Services.Configure<OpenClawNet.Models.GitHubCopilot.GitHubCopilotOptions
 });
 
 // MAF IAgentProvider registrations (Phase 1 — alongside existing IModelClient)
-builder.Services.AddSingleton<OllamaAgentProvider>();
-builder.Services.AddSingleton<IAgentProvider>(sp => sp.GetRequiredService<OllamaAgentProvider>());
-builder.Services.AddSingleton<AzureOpenAIAgentProvider>();
-builder.Services.AddSingleton<IAgentProvider>(sp => sp.GetRequiredService<AzureOpenAIAgentProvider>());
-builder.Services.AddSingleton<FoundryAgentProvider>();
-builder.Services.AddSingleton<IAgentProvider>(sp => sp.GetRequiredService<FoundryAgentProvider>());
-builder.Services.AddSingleton<FoundryLocalAgentProvider>();
-builder.Services.AddSingleton<IAgentProvider>(sp => sp.GetRequiredService<FoundryLocalAgentProvider>());
-builder.Services.AddSingleton<GitHubCopilotAgentProvider>();
-builder.Services.AddSingleton<IAgentProvider>(sp => sp.GetRequiredService<GitHubCopilotAgentProvider>());
+builder.Services.AddScoped<OllamaAgentProvider>();
+builder.Services.AddScoped<IAgentProvider>(sp => sp.GetRequiredService<OllamaAgentProvider>());
+builder.Services.AddScoped<AzureOpenAIAgentProvider>();
+builder.Services.AddScoped<IAgentProvider>(sp => sp.GetRequiredService<AzureOpenAIAgentProvider>());
+builder.Services.AddScoped<FoundryAgentProvider>();
+builder.Services.AddScoped<IAgentProvider>(sp => sp.GetRequiredService<FoundryAgentProvider>());
+builder.Services.AddScoped<FoundryLocalAgentProvider>();
+builder.Services.AddScoped<IAgentProvider>(sp => sp.GetRequiredService<FoundryLocalAgentProvider>());
+builder.Services.AddScoped<GitHubCopilotAgentProvider>();
+builder.Services.AddScoped<IAgentProvider>(sp => sp.GetRequiredService<GitHubCopilotAgentProvider>());
 
 // RuntimeAgentProvider routes to the active provider based on settings
-builder.Services.AddSingleton<RuntimeAgentProvider>();
-builder.Services.AddSingleton<IAgentProvider>(sp => sp.GetRequiredService<RuntimeAgentProvider>());
+builder.Services.AddScoped<RuntimeAgentProvider>();
+builder.Services.AddScoped<IAgentProvider>(sp => sp.GetRequiredService<RuntimeAgentProvider>());
 
 // Skills (K-1b — real registry replaces K-1a stub)
 // Wires ISkillsRegistry → OpenClawNetSkillsRegistry. Eagerly seeds the
@@ -186,13 +189,21 @@ builder.Services.AddMemory(builder.Configuration);
 
 // Tool framework + tools
 builder.Services.AddToolFramework();
+builder.Services.AddSingleton<IToolExecutionLoggingState>(_ =>
+{
+    var configured = builder.Configuration.GetSection("OpenClawNet:ToolExecutionLogging")
+        .Get<ToolExecutionLoggingOptions>() ?? new ToolExecutionLoggingOptions();
+
+    return new ToolExecutionLoggingState(configured);
+});
 // PR-B: also register the concrete tool types so the bundled MCP wrappers can
 // inject the existing ITool implementations through DI without duplicating logic.
 builder.Services.AddSingleton<FileSystemTool>();
 builder.Services.AddSingleton<ITool>(sp => sp.GetRequiredService<FileSystemTool>());
 builder.Services.AddSingleton<ShellTool>();
 builder.Services.AddSingleton<ITool>(sp => sp.GetRequiredService<ShellTool>());
-builder.Services.AddHttpClient<WebTool>();
+builder.Services.AddHttpClient<WebTool>(c =>
+    c.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; OpenClawNet/1.0; +https://github.com/elbruno/openclawnet)"));
 builder.Services.AddSingleton<ITool>(sp => sp.GetRequiredService<WebTool>());
 builder.Services.Configure<WebToolOptions>(builder.Configuration.GetSection("Tools:Web"));
 builder.Services.AddTool<SchedulerTool>();
@@ -201,7 +212,9 @@ builder.Services.AddSingleton<ITool>(sp => sp.GetRequiredService<BrowserTool>())
 
 // Markdown converter — uses ElBruno.MarkItDotNet to fetch a URL and return clean Markdown.
 builder.Services.AddMarkItDotNet();
-builder.Services.AddHttpClient(nameof(MarkItDownTool));
+builder.Services.AddSingleton<OpenClawNet.Tools.MarkItDown.IMarkdownService, OpenClawNet.Tools.MarkItDown.MarkdownServiceAdapter>();
+builder.Services.AddHttpClient(nameof(MarkItDownTool), c =>
+    c.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; OpenClawNet/1.0; +https://github.com/elbruno/openclawnet)"));
 builder.Services.AddSingleton<MarkItDownTool>();
 builder.Services.AddSingleton<ITool>(sp => sp.GetRequiredService<MarkItDownTool>());
 
@@ -227,8 +240,13 @@ builder.Services.AddSingleton<TextToSpeechTool>();
 builder.Services.AddSingleton<ITool>(sp => sp.GetRequiredService<TextToSpeechTool>());
 
 // GitHub — read-only repo browsing via Octokit. Optional GITHUB_TOKEN secret enables higher rate limits.
-builder.Services.AddSingleton<GitHubTool>();
-builder.Services.AddSingleton<ITool>(sp => sp.GetRequiredService<GitHubTool>());
+builder.Services.AddGitHubTool();
+
+// Dashboard — publish repository insights to external dashboard API. Requires approval.
+builder.Services.AddDashboardTool(builder.Configuration);
+
+// Google Workspace — Gmail and Calendar integration via Google APIs. S5 tools.
+builder.Services.AddGoogleWorkspaceTools(builder.Configuration);
 
 // Image editing — resize/convert/crop local images via SixLabors.ImageSharp.
 builder.Services.AddSingleton<ImageEditTool>();
@@ -378,6 +396,11 @@ using (var scope = app.Services.CreateScope())
     await profileStore.GetDefaultAsync();
 }
 
+if (await SecretsImportCommand.TryRunAsync(args, app.Services))
+    return;
+
+await builder.Configuration.AddResolvedVaultReferencesAsync(app.Services);
+
 // Register tools with the registry
 using (var scope = app.Services.CreateScope())
 {
@@ -421,12 +444,14 @@ app.MapChannelAdapterEndpoints();
 app.MapChannelEventStreamEndpoints();
 app.MapDemoEndpoints();
 app.MapAgentProfileEndpoints();
+app.MapHostedAgentExportEndpoints();
 app.MapModelProviderEndpoints();
 app.MapToolApprovalEndpoints();
 app.MapAuditEndpoints();
 app.MapMcpServerEndpoints();
 app.MapMcpServerToolsEndpoints();
 app.MapSecretsEndpoints();
+app.MapGoogleOAuthEndpoints();
 app.MapJobScheduleEndpoints();
 app.MapJobStreamEndpoints();
 app.MapRuntimeSettingsEndpoints();
